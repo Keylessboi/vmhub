@@ -36,11 +36,11 @@ lsblk -d -o NAME,SIZE,MODEL,TRAN
 ssacli ctrl slot=0 pd all show
 ```
 
-The VM-data pool is built on the **largest non-root, non-removable disk**
-(see `bootstrap/post-install.sh`, `find_data_disk`). The post-install script
-refuses to build a pool on the boot USB: it skips the disk that holds `/` and
-skips all removable devices. When a drive is installed into the P420i, create
-a logical volume first so the OS sees it:
+The post-install script builds the VM-data pool on the **largest non-root,
+non-removable disk** (see `bootstrap/post-install.sh`, `find_data_disk`).
+The script refuses to build a pool on the boot USB: it skips the disk that
+holds `/` and skips all removable devices. When you install a drive into the
+P420i, create a logical volume first so the OS sees it:
 
 ```
 ssacli ctrl slot=0 pd all show
@@ -59,7 +59,7 @@ The post-install script does this:
 
 1. Create a keyfile at `/etc/zfs/keys/vmhub.key`. The system disk is not
    encrypted, so this file survives reboots. It is the server-side key.
-2. Create an encrypted ZFS pool on the data disk:
+2. Create an encrypted ZFS pool on the data drive:
 
    ```
    zpool create -o ashift=12 vmhub /dev/sdX
@@ -102,11 +102,11 @@ The second case needs physical access to remove two drives from a server
 that is bolted and locked in place. That is the accepted boundary. If the
 threat model tightens, the path forward is: encrypt the system disk too
 (LVM+LUKS at install time, boot passphrase), or move the keyfile to a small
-USB that is removed after boot. Both changes are documented in the RUNBOOK.
+USB you remove after boot. Both changes are documented in the RUNBOOK.
 
 ## Compression settings
 
-- `compression=lz4` on the VM data pool (post-install).
+- `compression=lz4` on the VM-data pool (post-install).
 
 lz4 is fast enough that it costs almost nothing on a modern CPU, and it
 removes the repeated blocks that clone farms produce. If CPU is plentiful and
@@ -138,7 +138,7 @@ To retire a data drive:
 
 1. Stop the VMs that use it.
 2. Remove the drive from the pool, or let the pool degrade.
-3. Wipe the drive or throw it away. The data on it is encrypted. Without the
-   keyfile, which stays on the server, the data is unreadable.
+3. Wipe the drive or throw it away. The data on it is encrypted; without the
+   keyfile, which stays on the server, it is unreadable.
 
 No drilling required. No shredding required. The encryption did the work.

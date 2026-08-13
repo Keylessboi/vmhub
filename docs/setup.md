@@ -27,7 +27,7 @@ viewed remotely, and destroys when done.
 
 ## How to boot the installer (recovery path)
 
-The Proxmox VE 9.2 ISO and the answer file were mounted as virtual media on
+We mounted the Proxmox VE 9.2 ISO and the answer file as virtual media on
 the iLO. To reinstall (for example, for LVM+LUKS full-disk encryption):
 
 - Start the ISO server: `node scripts/iso-server.mjs bootstrap 8010`

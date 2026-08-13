@@ -106,7 +106,7 @@ Key Redfish endpoints:
 
 ## 5. Installer state — INSTALL COMPLETE (2026-08-13)
 
-- **Proxmox VE 9.2.2 IS INSTALLED** on the DL360p (HP ProLiant DL360p Gen8,
+- **Proxmox VE 9.2.2 is installed** on the DL360p (HP ProLiant DL360p Gen8,
   SN USE501J64C, 2× E5-2670 v2, 40 threads, **125GB RAM** — the RAM reseat
   worked). Host IP: `192.168.1.220`. The webUI is `https://192.168.1.220:8006`.
 - **The OS is on a USB flash drive**: `/dev/sda` = Samsung "Flash Drive"
@@ -124,7 +124,7 @@ Key Redfish endpoints:
 ## 6. POST-INSTALL checklist (the real work)
 
 1. **Run `bootstrap/post-install.sh`** on the host (as root). It is safe to
-   run now — it refuses to build a pool without a real data disk. It does:
+   run now — it refuses to build a pool without a real data drive. It does:
    - creates `vmbr1` NAT bridge (10.10.10.0/24) for test VMs
    - creates an encrypted **ZFS pool on the largest non-root, non-removable
      disk** (aes-256-gcm, dataset `vmhub/data`, keyfile
