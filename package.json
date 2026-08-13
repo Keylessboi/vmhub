@@ -1,0 +1,42 @@
+{
+  "name": "vmhub",
+  "version": "0.1.0",
+  "description": "Unified VM MCP — agents drive VMs (hyprland/X11/Windows/macOS/Android) without VM complexity",
+  "type": "module",
+  "private": true,
+  "module": "index.ts",
+  "bin": {
+    "vmhub-mcp": "./dist/vmhub-mcp"
+  },
+  "scripts": {
+    "build": "bun build src/mcp/index.ts --compile --outfile dist/vmhub-mcp",
+    "build:lite": "bun build src/lite/server.ts --compile --outfile dist/vmhub-lite",
+    "build:reaper": "bun build src/reaper/index.ts --compile --outfile dist/vmhub-reaper",
+    "dev": "tsx src/mcp/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mcp",
+    "vm",
+    "proxmox",
+    "hyprland",
+    "computer-use",
+    "automation"
+  ],
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^26.2.0",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.4.3"
+  },
+  "license": "MIT"
+}
