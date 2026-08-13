@@ -104,7 +104,8 @@ pveum user add vmhub@pve --comment "vmhub control plane"
 pveum user token add vmhub@pve automation --privsep 1
 pveum acl modify /vms -token 'vmhub@pve!automation' -role PVEVMAdmin
 echo
-echo "NOTE: store the token secret printed above into ~/.env as PVE_TOKEN"
-echo "      (the secret is shown once by pveum — capture it now)."
+echo "NOTE: store the token secret printed above into Doppler (project: proxmox,"
+echo "      config: prd) as PVE_TOKEN. It is shown once by pveum — capture it now."
+echo "      Doppler: cd ~/Projects/vmhub && doppler secrets set PVE_TOKEN=<paste>"
 echo
 echo "==> done. reboot or 'ifup vmbr1' to activate NAT."
