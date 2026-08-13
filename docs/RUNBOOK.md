@@ -104,29 +104,40 @@ Key Redfish endpoints:
    Capture the `#videoContainer` region via
    `page.screenshot({clip: rect})` → OCR with tesseract.
 
-## 5. The installer state (when this doc was written)
+## 5. Installer state — INSTALL COMPLETE (2026-08-13)
 
-- Proxmox VE 9.2 installer is RUNNING on the server (booted from mounted ISO)
-- Was at "Target Harddisk" screen: `/dev/sda 119.51 GiB` — proceed with Next
-- The unattended answer file was NOT auto-picked (EULA was interactive),
-  so the install is being driven manually through the console.
-  Navigation: Tab to focus Next, Enter. `renderer.keyboard.send_vkey`.
-- After install completes: server reboots, boots into Proxmox from disk
-  (CD-top boot order only matters while ISO mounted — once installed, the
-  hard disk boots normally).
+- **Proxmox VE 9.2.2 IS INSTALLED** on the DL360p. The OS landed on the
+  Samsung NVMe (250GB) using the **default LVM-thin layout** (keylessboi drove
+  the wizard manually; the answer file's ZFS section was NOT used).
+- **The 1TB drive EXISTS**: `/dev/sda` = WDC WD10EZEX 931.5G. The P420i is
+  passing it through. It is NOT yet part of a pool — post-install creates an
+  encrypted ZFS pool on it for VM data.
+- **⚠️ Host NICs are NOT cabled to the LAN yet.** The iLO has its own
+  dedicated mgmt port (192.168.1.216, always on). The host's 4× onboard NICs
+  need a separate ethernet cable to the switch. Until then the webUI is not
+  reachable. **The webUI scan found a Dell Vostro 3681 at 192.168.1.153 — that
+  is NOT our server; verify via dmidecode before post-install.**
+- RAM: 128GB installed; recon showed 15GB on the decoy host (wrong box).
+  Verify actual RAM on the real DL360p post-cable (reseat may have fixed the
+  earlier 96GB/207 errors).
+- Navigation recipe for the console (if needed again): Tab to focus Next,
+  Enter. `renderer.keyboard.send_vkey`. Mouse clicks need normalized 0-3000
+  coords, not pixels. See `docs/proxmox-setup-field-guide.md`.
 
 ## 6. POST-INSTALL checklist (the real work)
 
-1. **Detect the 1TB drive**: `lsblk`, `lsscsi`, `smartctl -i /dev/sdX`.
-   If P420i array unconfigured: F8 (Option ROM) or SSA to build the array,
-   OR the 1TB may be a separate SATA disk. Configure it as the VM-data pool.
-2. **Run `bootstrap/post-install.sh`** on the host (as root):
+1. **Cable the host NICs** to the LAN, find the DL360p IP (scan :8006, verify
+   dmidecode = ProLiant/DL360, NOT Dell). Then `verify` the 1TB disk on the
+   REAL host: `lsblk` should show sda (WD 1TB) + nvme0n1 (Samsung).
+2. **Run `bootstrap/post-install.sh`** on the host (as root). It now handles
+   the LVM-thin layout:
    - creates `vmbr1` NAT bridge (10.10.10.0/24) for test VMs
-   - creates encrypted `rpool/vmhub` ZFS dataset (aes-256-gcm) with keyfile
-     at `/etc/zfs/keys/vmhub.key`, auto-loaded at boot (no boot password)
-   - creates scoped `vmhub@pve` API token — token prints ONCE, that's yours
-     to capture into Doppler as `PVE_TOKEN` + `PVE_HOST`
-   - the 1TB drive becomes the storage where VMs actually live
+   - creates encrypted **ZFS pool `vmhub` on /dev/sda (the 1TB)** with dataset
+     `vmhub/data` (aes-256-gcm) + keyfile `/etc/zfs/keys/vmhub.key`,
+     auto-loaded at boot (no boot password) via systemd unit
+     `zfs-load-vmhub-key.service`
+   - creates scoped `vmhub@pve` API token — token prints ONCE, that's
+     keylessboi's to capture into Doppler as `PVE_TOKEN` + `PVE_HOST`
 3. **Deploy vmhub via Doppler**:
    `doppler run --project proxmox --config prd -- ./deploy/install.sh`
    (renders PVE_HOST/PVE_TOKEN into /etc/vmhub/*.env by reference)
@@ -136,8 +147,8 @@ Key Redfish endpoints:
    across hyprland + real VM adapters.
 5. **Beep**: confirm POST shows 128GB (reseat result); if beep persists, RBSU
    POST Error Beep = Disabled.
-6. keylessboi handoff: brief them on PVE_HOST, that PVE_TOKEN is ready to capture,
-   and the 1TB-drive finding.
+6. keylessboi handoff: brief on PVE_HOST, that PVE_TOKEN is ready to capture,
+   and confirm the 1TB-drive ZFS pool is in place.
 
 ## 7. vmhub architecture (30-second version)
 
