@@ -232,6 +232,15 @@ dialog) to dismiss before retrying.
 ## 8. Environment facts that matter
 
 - Desktop LAN IP: 192.168.1.164 (WiFi). iLO: 192.168.1.216 (dedicated mgmt).
+- **The DL360p has TWO separate network connections.**
+  1. The **iLO management port** — the BMC's own dedicated NIC (192.168.1.216).
+     Always on, always reachable, even when the host is off.
+  2. The **host onboard NICs** (4× RJ45 on the back) — the actual Proxmox
+     server's LAN ports. **These need their OWN ethernet cable** to the
+     switch/router. The iLO port is NOT the host's network.
+  This caused a real stall: Proxmox installed and ran fine, but the host had
+  no network because only the iLO port was wired. Check host-NIC link, not
+  just the iLO, when the webUI doesn't appear.
 - **The Proxmox host gets 192.168.1.220/24 — NOT .216.** The .216 address
   belongs to the iLO's dedicated management NIC. Setting the host to .216
   causes an IP conflict on the LAN. This was a real bug in the answer file.
@@ -243,6 +252,10 @@ dialog) to dismiss before retrying.
   exist — after install, check `lsblk`/`smartctl` and configure it for VM data.
 - The box beeps during POST due to those errors; RBSU POST Error Beep = Disabled
   silences it.
+- **Verify the webUI host is YOUR server before post-install.** A LAN scan for
+  :8006 can find OTHER Proxmox boxes (a Dell Vostro 3681 at .153 was mistaken
+  for the DL360p). Confirm via dmidecode (Manufacturer/Product) + CPU count
+  before running anything against it.
 
 ## 9. Secrets handling (non-negotiable)
 
