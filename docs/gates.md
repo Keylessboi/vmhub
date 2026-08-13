@@ -3,16 +3,17 @@
 These three answers gate the server-integration phases (Phase 3+). The desktop
 demo (mock control plane + live hyprland adapter) works WITHOUT them.
 
-## Gate 1 — GitHub write access (gates GitHub App token scopes)
+## Gate 1 — GitHub access (RESOLVED 2026-08-13: PULL-ONLY)
 
-Which repositories do VMs need **write** access to? VMs are signed into
-`gh` as LO. The blessed mechanism is a GitHub App installation token
-(scriptable, per-repo + per-permission scope, 1-hour auto-expiry, revocable).
-The app's permissions must be scoped to exactly these repos.
+VMs need **pull-only** access to LO's repos. Decision: a single **fine-grained
+PAT** scoped to Repository access (LO's repos) + **Contents: Read-only**,
+stored in Doppler as `GH_PULL_TOKEN`. VMs get it via cloud-init git credential
+helper. Fine-grained PATs are UI-only to create — LO creates it once, pastes
+into Doppler by reference. (Alternative per-repo: read-only deploy keys via
+`gh repo deploy-key add`, scriptable, but per-repo.)
 
-- [ ] List the repos: `____________`
-- [ ] Write access needed? yes/no → `____________`
-- [ ] Read-only clone repos (deploy-key path instead): `____________`
+- [ ] LO creates fine-grained PAT (Contents: Read-only on repos)
+- [ ] Store in Doppler: `doppler secrets set GH_PULL_TOKEN=<paste>`
 
 ## Gate 2 — Android (gates the Android adapter v1)
 
@@ -42,3 +43,11 @@ installer runs, then confirm `disk_list` in `bootstrap/proxmox-answers.dat`.
 
 - [ ] Controller mode confirmed: `____________`
 - [ ] Physical disk count: `____________`
+
+## Gate 5 — Roblox Studio in VMs (RESOLVED 2026-08-13: UNBLOCKED)
+
+LO confirmed: **Roblox Studio runs fine in a VM; the anti-cheat applies to the
+Roblox CLIENT only, not Studio.** The Windows VM family (`windows-11-24h2`,
+CursorTouch) is therefore GO, not conditional. Build the Windows golden after
+the base install; no GPU passthrough needed (WARP software rendering is
+acceptable for Studio).
