@@ -236,9 +236,9 @@ dialog) to dismiss before retrying.
   belongs to the iLO's dedicated management NIC. Setting the host to .216
   causes an IP conflict on the LAN. This was a real bug in the answer file.
 - The iLO is on the same subnet; desktop firewall must allow 8010.
-- Install target: `/dev/sda` (119.51 GiB Flash Drive) — LO approved.
+- Install target: `/dev/sda` (119.51 GiB Flash Drive) — keylessboi approved.
 - RAM: 128GB installed, only 96GB detected (POST error 207 on both CPUs'
-  "Socket 4" DIMM banks). LO reseated RAM to fix — verify POST shows 128GB.
+  "Socket 4" DIMM banks). keylessboi reseated RAM to fix — verify POST shows 128GB.
 - Smart Array P420i: "No Drives Detected / 0 Logical Drives". A 1TB drive may
   exist — after install, check `lsblk`/`smartctl` and configure it for VM data.
 - The box beeps during POST due to those errors; RBSU POST Error Beep = Disabled
@@ -249,7 +249,7 @@ dialog) to dismiss before retrying.
 - iLO password: `$PASSWORD` from `~/.env`, by reference. NEVER echo it.
 - Proxmox root pw: `$PVE_ROOT_PW` (also in Doppler project `proxmox`, config `prd`).
 - Proxmox API token: created by post-install.sh, printed ONCE to console,
-  LO captures it into Doppler as `PVE_TOKEN`. The agent never reads it.
+  you capture it into Doppler as `PVE_TOKEN`. The agent never reads it.
 - Doppler: `doppler run --project proxmox --config prd -- <cmd>` injects
   secrets by reference. `doppler secrets set` from a filtered env file.
 - NEVER commit secrets. `.env` gitignored. Only `.env.example` (names) ships.

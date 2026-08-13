@@ -1,18 +1,20 @@
-# vmhub Phase-0 Gates — answers required from LO
+# vmhub Phase-0 Gates — answers required from keylessboi
 
 These three answers gate the server-integration phases (Phase 3+). The desktop
 demo (mock control plane + live hyprland adapter) works WITHOUT them.
 
-## Gate 1 — GitHub access (RESOLVED 2026-08-13: PULL-ONLY)
+## Gate 1 — GitHub access (RESOLVED 2026-08-13: PULL-ONLY, incl. PRIVATE repos)
 
-VMs need **pull-only** access to LO's repos. Decision: a single **fine-grained
-PAT** scoped to Repository access (LO's repos) + **Contents: Read-only**,
-stored in Doppler as `GH_PULL_TOKEN`. VMs get it via cloud-init git credential
-helper. Fine-grained PATs are UI-only to create — LO creates it once, pastes
+VMs need **pull-only** access to keylessboi's repos — **public AND private**.
+Decision: a single **fine-grained PAT** scoped to Repository access
+(keylessboi's repos, including private) + **Contents: Read-only**, stored in
+Doppler as `GH_PULL_TOKEN`. VMs get it via cloud-init git credential helper.
+Fine-grained PATs are UI-only to create — you create it once, pastes
 into Doppler by reference. (Alternative per-repo: read-only deploy keys via
 `gh repo deploy-key add`, scriptable, but per-repo.)
 
-- [ ] LO creates fine-grained PAT (Contents: Read-only on repos)
+- [ ] You create a fine-grained PAT (Repository access: keylessboi's repos incl.
+      private; Permissions: Contents Read-only)
 - [ ] Store in Doppler: `doppler secrets set GH_PULL_TOKEN=<paste>`
 
 ## Gate 2 — Android (gates the Android adapter v1)
@@ -46,7 +48,7 @@ installer runs, then confirm `disk_list` in `bootstrap/proxmox-answers.dat`.
 
 ## Gate 5 — Roblox Studio in VMs (RESOLVED 2026-08-13: UNBLOCKED)
 
-LO confirmed: **Roblox Studio runs fine in a VM; the anti-cheat applies to the
+keylessboi confirmed: **Roblox Studio runs fine in a VM; the anti-cheat applies to the
 Roblox CLIENT only, not Studio.** The Windows VM family (`windows-11-24h2`,
 CursorTouch) is therefore GO, not conditional. Build the Windows golden after
 the base install; no GPU passthrough needed (WARP software rendering is
