@@ -26,7 +26,7 @@ import {
   runOnce,
   sweep,
 } from "./index.ts";
-import { loadDbDriver, openReaperDb, SCHEMA_SQL, type DbConnection } from "./reaper.db.ts";
+import { loadDbDriver, openReaperDb, resolveReaperDbPath, SCHEMA_SQL, type DbConnection } from "./reaper.db.ts";
 
 const HOUR = 60 * 60 * 1000;
 
@@ -226,6 +226,42 @@ describe("findVmByIdentity", () => {
     await proxmox.createVm({ templateId: "windows-11-24h2", name: "win-u-1", proxmoxTag: "vmhub-win-u-1" });
     await proxmox.createVm({ templateId: "windows-11-24h2", name: "win-u-1", proxmoxTag: "vmhub-win-u-1" });
     await expect(findVmByIdentity(proxmox, "vmhub-win-u-1", "win")).rejects.toThrow(/collision/);
+  });
+
+  it("matches the identity tag via the tags[] array (real API shape)", async () => {
+    const proxmox = new MockProxmox();
+    // Real Proxmox carries vmhub-* among many tags; proxmoxTag field may be absent.
+    await proxmox.createVm({ templateId: "windows-11-24h2", name: "win-u-9", proxmoxTag: "vmhub-win-u-9" });
+    const found = await findVmByIdentity(proxmox, "vmhub-win-u-9", "win");
+    expect(found?.vmid).toBe(1000);
+  });
+});
+
+describe("resolveReaperDbPath", () => {
+  const saved = { db: process.env.VMHUB_DB, leaseDir: process.env.VMHUB_LEASE_DIR };
+
+  afterEach(() => {
+    if (saved.db === undefined) delete process.env.VMHUB_DB;
+    else process.env.VMHUB_DB = saved.db;
+    if (saved.leaseDir === undefined) delete process.env.VMHUB_LEASE_DIR;
+    else process.env.VMHUB_LEASE_DIR = saved.leaseDir;
+  });
+
+  it("prefers the explicit VMHUB_DB file", () => {
+    process.env.VMHUB_DB = "/srv/custom.sqlite";
+    expect(resolveReaperDbPath()).toBe("/srv/custom.sqlite");
+  });
+
+  it("falls back to <VMHUB_LEASE_DIR>/leases.sqlite", () => {
+    delete process.env.VMHUB_DB;
+    process.env.VMHUB_LEASE_DIR = "/srv/leases";
+    expect(resolveReaperDbPath()).toBe("/srv/leases/leases.sqlite");
+  });
+
+  it("defaults to ./leases/leases.sqlite (lite's default)", () => {
+    delete process.env.VMHUB_DB;
+    delete process.env.VMHUB_LEASE_DIR;
+    expect(resolveReaperDbPath()).toBe("leases/leases.sqlite");
   });
 });
 
@@ -457,6 +493,44 @@ describe("reaper sweep", () => {
     expect(report.refusedDiskFull).toBe(true);
     expect(report.destroyed).toBe(0);
     expect((await proxmox.listVms()).length).toBe(1);
+  });
+
+  it("uses the ProxmoxClient disk seam (diskFreeBytes/diskUsedBytes) for the refusal", async () => {
+    const proxmox = new MockProxmox();
+    await seedProxmoxVm(proxmox, fx);
+    const now = Date.now();
+    await seedLease(fx, {
+      vm: makeVm(fx),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+    });
+    // Host reports only 5% free via the client seam — sweep must refuse.
+    proxmox.diskFreeBytes = async () => 5;
+    proxmox.diskUsedBytes = async () => 95;
+
+    db = await openReaperDb(fx.dbPath);
+    const report = await sweep(db, proxmox, { artifactDir: fx.artifactDir, now: () => now });
+
+    expect(report.refusedDiskFull).toBe(true);
+    expect(report.destroyed).toBe(0);
+    expect((await proxmox.listVms()).length).toBe(1);
+  });
+
+  it("reaps normally when the client seam reports plenty of free disk", async () => {
+    const proxmox = new MockProxmox();
+    await seedProxmoxVm(proxmox, fx);
+    const now = Date.now();
+    await seedLease(fx, {
+      vm: makeVm(fx),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+    });
+    proxmox.diskFreeBytes = async () => 900;
+    proxmox.diskUsedBytes = async () => 100;
+
+    db = await openReaperDb(fx.dbPath);
+    const report = await sweep(db, proxmox, { artifactDir: fx.artifactDir, now: () => now });
+
+    expect(report.refusedDiskFull).toBe(false);
+    expect(report.destroyed).toBe(1);
   });
 
   it("never touches VMs it does not own (identity verified)", async () => {

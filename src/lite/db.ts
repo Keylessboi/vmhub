@@ -142,9 +142,9 @@ export class LiteDb {
 
   insertVm(vm: VmRow): void {
     this.db
-      .query(
+      .prepare(
         `INSERT INTO vms (${VMS_COLUMNS})
-         VALUES ($uuid, $vmid, $templateId, $adapter, $capabilities, $proxmoxTag, $namePrefix, $status, $sshPort, $scratchDir, $createdAt)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         vm.uuid,
@@ -162,26 +162,26 @@ export class LiteDb {
   }
 
   getVm(uuid: string): VmRow | null {
-    const row = this.db.query(`SELECT ${VMS_COLUMNS} FROM vms WHERE uuid = ?`).get(uuid);
+    const row = this.db.prepare(`SELECT ${VMS_COLUMNS} FROM vms WHERE uuid = ?`).get(uuid);
     return rowToVm(row);
   }
 
   getVmByVmid(vmid: number): VmRow | null {
-    const row = this.db.query(`SELECT ${VMS_COLUMNS} FROM vms WHERE vmid = ?`).get(vmid);
+    const row = this.db.prepare(`SELECT ${VMS_COLUMNS} FROM vms WHERE vmid = ?`).get(vmid);
     return rowToVm(row);
   }
 
   listVms(): VmRow[] {
-    const rows = this.db.query(`SELECT ${VMS_COLUMNS} FROM vms ORDER BY createdAt`).all();
+    const rows = this.db.prepare(`SELECT ${VMS_COLUMNS} FROM vms ORDER BY createdAt`).all();
     return rows.map(rowToVm).filter((vm): vm is VmRow => vm !== null);
   }
 
   updateVmStatus(uuid: string, status: Vm["status"]): void {
-    this.db.query("UPDATE vms SET status = ? WHERE uuid = ?").run(status, uuid);
+    this.db.prepare("UPDATE vms SET status = ? WHERE uuid = ?").run(status, uuid);
   }
 
   deleteVm(uuid: string): void {
-    this.db.query("DELETE FROM vms WHERE uuid = ?").run(uuid);
+    this.db.prepare("DELETE FROM vms WHERE uuid = ?").run(uuid);
   }
 
   // -------------------------------------------------------------------------
@@ -190,9 +190,9 @@ export class LiteDb {
 
   insertLease(lease: LeaseRow): void {
     this.db
-      .query(
+      .prepare(
         `INSERT INTO leases (${LEASES_COLUMNS})
-         VALUES ($vmId, $owner, $requestId, $status, $expiresAt, $lastRenewedAt, $renewCount, $maxLifetimeMs, $createdAt)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         lease.vmId,
@@ -208,21 +208,21 @@ export class LiteDb {
   }
 
   getLease(vmId: string): LeaseRow | null {
-    const row = this.db.query(`SELECT ${LEASES_COLUMNS} FROM leases WHERE vmId = ?`).get(vmId);
+    const row = this.db.prepare(`SELECT ${LEASES_COLUMNS} FROM leases WHERE vmId = ?`).get(vmId);
     return rowToLease(row);
   }
 
   /** Idempotency lookup: the requestId → lease mapping. */
   getLeaseByRequestId(requestId: string): LeaseRow | null {
     const row = this.db
-      .query(`SELECT ${LEASES_COLUMNS} FROM leases WHERE requestId = ?`)
+      .prepare(`SELECT ${LEASES_COLUMNS} FROM leases WHERE requestId = ?`)
       .get(requestId);
     return rowToLease(row);
   }
 
   updateLease(lease: LeaseRow): void {
     this.db
-      .query(
+      .prepare(
         `UPDATE leases SET owner = ?, requestId = ?, status = ?, expiresAt = ?, lastRenewedAt = ?, renewCount = ?, maxLifetimeMs = ?, createdAt = ?
          WHERE vmId = ?`,
       )
@@ -241,13 +241,13 @@ export class LiteDb {
 
   markLeaseReleased(vmId: string, now: number): void {
     this.db
-      .query("UPDATE leases SET status = 'released', lastRenewedAt = ? WHERE vmId = ?")
+      .prepare("UPDATE leases SET status = 'released', lastRenewedAt = ? WHERE vmId = ?")
       .run(now, vmId);
   }
 
   listActiveLeases(): LeaseRow[] {
     const rows = this.db
-      .query(`SELECT ${LEASES_COLUMNS} FROM leases WHERE status = 'active' ORDER BY createdAt`)
+      .prepare(`SELECT ${LEASES_COLUMNS} FROM leases WHERE status = 'active' ORDER BY createdAt`)
       .all();
     return rows.map(rowToLease).filter((l): l is LeaseRow => l !== null);
   }
@@ -258,9 +258,9 @@ export class LiteDb {
 
   insertArtifact(record: ArtifactRecord): void {
     this.db
-      .query(
+      .prepare(
         `INSERT INTO artifacts (${ARTIFACTS_COLUMNS})
-         VALUES ($id, $leaseId, $hostPath, $sizeBytes, $inFlight, $createdAt)`,
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
@@ -273,29 +273,29 @@ export class LiteDb {
   }
 
   getArtifact(id: string): ArtifactRecord | null {
-    const row = this.db.query(`SELECT ${ARTIFACTS_COLUMNS} FROM artifacts WHERE id = ?`).get(id);
+    const row = this.db.prepare(`SELECT ${ARTIFACTS_COLUMNS} FROM artifacts WHERE id = ?`).get(id);
     return rowToArtifact(row);
   }
 
   listArtifactsForLease(leaseId: string): ArtifactRecord[] {
     const rows = this.db
-      .query(`SELECT ${ARTIFACTS_COLUMNS} FROM artifacts WHERE leaseId = ? ORDER BY createdAt`)
+      .prepare(`SELECT ${ARTIFACTS_COLUMNS} FROM artifacts WHERE leaseId = ? ORDER BY createdAt`)
       .all(leaseId);
     return rows.map(rowToArtifact).filter((a): a is ArtifactRecord => a !== null);
   }
 
   setArtifactInFlight(id: string, inFlight: boolean): void {
-    this.db.query("UPDATE artifacts SET inFlight = ? WHERE id = ?").run(inFlight ? 1 : 0, id);
+    this.db.prepare("UPDATE artifacts SET inFlight = ? WHERE id = ?").run(inFlight ? 1 : 0, id);
   }
 
   deleteArtifactsForLease(leaseId: string): void {
-    this.db.query("DELETE FROM artifacts WHERE leaseId = ?").run(leaseId);
+    this.db.prepare("DELETE FROM artifacts WHERE leaseId = ?").run(leaseId);
   }
 
   /** Count artifacts still marked in-flight (reaper draining check). */
   countInFlightArtifacts(leaseId: string): number {
     const row = this.db
-      .query("SELECT COUNT(*) AS n FROM artifacts WHERE leaseId = ? AND inFlight = 1")
+      .prepare("SELECT COUNT(*) AS n FROM artifacts WHERE leaseId = ? AND inFlight = 1")
       .get(leaseId) as { n: number };
     return Number(row.n);
   }

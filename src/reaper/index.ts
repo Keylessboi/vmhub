@@ -18,10 +18,10 @@
  */
 
 import { rm } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { MockProxmox, type ProxmoxClient, type ProxmoxVm } from "../lite/proxmox.ts";
 import type { ArtifactRecord, Lease, Vm } from "../shared/types.ts";
-import { openReaperDb, type ReaperDb } from "./reaper.db.ts";
+import { openReaperDb, resolveReaperDbPath, type ReaperDb } from "./reaper.db.ts";
 
 /** Default hard cap on lease lifetime (plan: 24 h). Overridable per lease via maxLifetimeMs. */
 export const DEFAULT_MAX_LIFETIME_MS = 24 * 60 * 60 * 1000;
@@ -244,10 +244,8 @@ export async function runOnce(opts: ReaperRuntimeOptions = {}): Promise<SweepRep
 
 /** CLI entrypoint: run once (systemd timer) or loop when VMHUB_REAPER_INTERVAL_MS is set. */
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
-  // Match lite's default location: <leaseDir>/leases.sqlite. The explicit
-  // VMHUB_DB override wins, then the shared VMHUB_LEASE_DIR, then the default.
-  const dbPath =
-    process.env[ENV.db] ?? join(process.env[ENV.leaseDir] ?? "leases", "leases.sqlite");
+  // Same precedence as lite's resolveDbPath: VMHUB_DB > <VMHUB_LEASE_DIR>/leases.sqlite.
+  const dbPath = resolveReaperDbPath();
   const leaseDir = process.env[ENV.leaseDir];
   const artifactDir = process.env[ENV.artifactDir];
   const diskFullRefusalPct = Number(process.env[ENV.diskFullPct] ?? DEFAULT_DISK_FULL_REFUSAL_PCT);
@@ -259,8 +257,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       [
         "vmhub-reaper — independent lease reaper",
         "",
-        `  ${ENV.db}            sqlite path (default: leases.sqlite)`,
-        `  ${ENV.leaseDir}       lease files root`,
+        `  ${ENV.db}            sqlite path (default: <VMHUB_LEASE_DIR>/leases.sqlite)`,
+        `  ${ENV.leaseDir}       lease dir (default: ./leases)`,
         `  ${ENV.artifactDir}    staged artifact root`,
         `  ${ENV.diskFullPct}    disk-full refusal %% (default ${DEFAULT_DISK_FULL_REFUSAL_PCT})`,
         `  ${ENV.drainTimeoutMs} in-flight transfer hard timeout ms (default ${DEFAULT_DRAIN_TIMEOUT_MS})`,

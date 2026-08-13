@@ -14,6 +14,7 @@
  */
 
 import type { ArtifactRecord, Lease, Vm, VmStatus } from "../shared/types.ts";
+import { join } from "node:path";
 
 /** Env-var name for the SQLite path (shared with lite). */
 export const VMHUB_DB_ENV = "VMHUB_DB";
@@ -283,11 +284,11 @@ class SqliteReaperDb implements ReaperDb {
 
 /**
  * Open (and if needed, create) the shared leases.sqlite.
- * @param dbPath path to the SQLite file — defaults to DEFAULT_DB_PATH.
+ * @param dbPath path to the SQLite file — defaults to resolveReaperDbPath().
  * @param driver explicit driver for tests (defaults to the adaptive loader).
  */
 export async function openReaperDb(
-  dbPath: string = DEFAULT_DB_PATH,
+  dbPath: string = resolveReaperDbPath(),
   driver?: DbCtor,
 ): Promise<ReaperDb> {
   const Ctor = driver ?? (await loadDbDriver());
