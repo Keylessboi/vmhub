@@ -48,6 +48,57 @@ mkdir -p /var/lib/vmhub/leases
 mkdir -p /var/lib/vmhub/artifacts
 chmod 700 /var/lib/vmhub
 
+echo "==> FDE: encrypted VM-data dataset (aes-256-gcm, server-side keyfile)"
+# The installer cannot encrypt. We layer ZFS native encryption on a dedicated
+# dataset. The keyfile lives on the (unencrypted) system pool — on the server,
+# as requested — and is auto-loaded at boot by systemd. No boot password.
+# Any pulled data drive is unreadable without the keyfile.
+KEYS_DIR=/etc/zfs/keys
+mkdir -p "$KEYS_DIR"
+chmod 700 "$KEYS_DIR"
+if [ ! -f "$KEYS_DIR/vmhub.key" ]; then
+  dd if=/dev/urandom of="$KEYS_DIR/vmhub.key" bs=32 count=1 status=none
+  chmod 600 "$KEYS_DIR/vmhub.key"
+fi
+
+# Create the encrypted dataset if it does not exist yet.
+if ! zfs list rpool/vmhub >/dev/null 2>&1; then
+  zfs create \
+    -o encryption=aes-256-gcm \
+    -o keyformat=raw \
+    -o keylocation=file://${KEYS_DIR}/vmhub.key \
+    -o compression=lz4 \
+    -o recordsize=16K \
+    -o xattr=sa \
+    -o atime=off \
+    rpool/vmhub
+  zfs load-key rpool/vmhub
+  echo "   created encrypted rpool/vmhub (aes-256-gcm, keyfile auto-load)"
+fi
+
+# Auto-load the key at boot, before anything mounts the dataset.
+cat > /etc/systemd/system/zfs-load-vmhub-key.service <<EOF
+[Unit]
+Description=Load ZFS encryption key for rpool/vmhub
+DefaultDependencies=no
+After=systemd-udev-settle.service
+Before=zfs-mount.service
+Requires=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/zfs load-key rpool/vmhub
+ExecStartPost=/usr/bin/zfs mount rpool/vmhub
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable zfs-load-vmhub-key.service
+
+echo "   FDE configured. Verify with: zfs get encryption,keylocation rpool/vmhub"
+
 echo "==> Proxmox API token for vmhub (scoped, never root password)"
 pveum user add vmhub@pve --comment "vmhub control plane"
 pveum user token add vmhub@pve automation --privsep 1
