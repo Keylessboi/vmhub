@@ -46,10 +46,8 @@ installer runs, then confirm `disk_list` in `bootstrap/proxmox-answers.dat`.
 - [ ] Controller mode confirmed: `____________`
 - [ ] Physical disk count: `____________`
 
-## Gate 5 — Roblox Studio in VMs (RESOLVED 2026-08-13: UNBLOCKED)
+## Gate 5 — Windows VM family viability (RESOLVED 2026-08-13: UNBLOCKED)
 
-keylessboi confirmed: **Roblox Studio runs fine in a VM; the anti-cheat applies to the
-Roblox CLIENT only, not Studio.** The Windows VM family (`windows-11-24h2`,
-CursorTouch) is therefore GO, not conditional. Build the Windows golden after
-the base install; no GPU passthrough needed (WARP software rendering is
-acceptable for Studio).
+The Windows VM family (`windows-11-24h2`, CursorTouch) is GO. Software
+rendering (WARP) is acceptable for the golden; no GPU passthrough needed.
+Build the Windows golden after the base install.
