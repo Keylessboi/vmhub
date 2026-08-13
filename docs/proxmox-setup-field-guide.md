@@ -232,6 +232,9 @@ dialog) to dismiss before retrying.
 ## 8. Environment facts that matter
 
 - Desktop LAN IP: 192.168.1.164 (WiFi). iLO: 192.168.1.216 (dedicated mgmt).
+- **The Proxmox host gets 192.168.1.220/24 — NOT .216.** The .216 address
+  belongs to the iLO's dedicated management NIC. Setting the host to .216
+  causes an IP conflict on the LAN. This was a real bug in the answer file.
 - The iLO is on the same subnet; desktop firewall must allow 8010.
 - Install target: `/dev/sda` (119.51 GiB Flash Drive) — LO approved.
 - RAM: 128GB installed, only 96GB detected (POST error 207 on both CPUs'
