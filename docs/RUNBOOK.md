@@ -106,38 +106,37 @@ Key Redfish endpoints:
 
 ## 5. Installer state — INSTALL COMPLETE (2026-08-13)
 
-- **Proxmox VE 9.2.2 IS INSTALLED** on the DL360p. The OS landed on the
-  Samsung NVMe (250GB) using the **default LVM-thin layout** (keylessboi drove
-  the wizard manually; the answer file's ZFS section was NOT used).
-- **The 1TB drive EXISTS**: `/dev/sda` = WDC WD10EZEX 931.5G. The P420i is
-  passing it through. It is NOT yet part of a pool — post-install creates an
-  encrypted ZFS pool on it for VM data.
-- **⚠️ Host NICs are NOT cabled to the LAN yet.** The iLO has its own
-  dedicated mgmt port (192.168.1.216, always on). The host's 4× onboard NICs
-  need a separate ethernet cable to the switch. Until then the webUI is not
-  reachable. **The webUI scan found a Dell Vostro 3681 at 192.168.1.153 — that
-  is NOT our server; verify via dmidecode before post-install.**
-- RAM: 128GB installed; recon showed 15GB on the decoy host (wrong box).
-  Verify actual RAM on the real DL360p post-cable (reseat may have fixed the
-  earlier 96GB/207 errors).
-- Navigation recipe for the console (if needed again): Tab to focus Next,
-  Enter. `renderer.keyboard.send_vkey`. Mouse clicks need normalized 0-3000
-  coords, not pixels. See `docs/proxmox-setup-field-guide.md`.
+- **Proxmox VE 9.2.2 IS INSTALLED** on the DL360p (HP ProLiant DL360p Gen8,
+  SN USE501J64C, 2× E5-2670 v2, 40 threads, **125GB RAM** — the RAM reseat
+  worked). Host IP: `192.168.1.220`. The webUI is `https://192.168.1.220:8006`.
+- **The OS is on a USB flash drive**: `/dev/sda` = Samsung "Flash Drive"
+  119.5G (removable). Root, swap and the thin pool all live on it, in the
+  default LVM-thin layout. There is NO internal disk: the P420i has zero
+  physical drives, all six AHCI ports are empty, no NVMe.
+- **There is NO 1TB drive in this server.** The earlier "WDC WD10EZEX 931.5G"
+  finding was the Dell Vostro decoy's disk (192.168.1.153), not the DL360p's.
+- The webUI scan found a **Dell Vostro 3681 at 192.168.1.153 — that is NOT our
+  server.** Verify via dmidecode (ProLiant/DL360) before any post-install work.
+- The installer was driven manually (the answer file's ZFS section was not
+  used). Navigation recipe: Tab to focus Next, Enter,
+  `renderer.keyboard.send_vkey`. See `docs/proxmox-setup-field-guide.md`.
 
 ## 6. POST-INSTALL checklist (the real work)
 
-1. **Cable the host NICs** to the LAN, find the DL360p IP (scan :8006, verify
-   dmidecode = ProLiant/DL360, NOT Dell). Then `verify` the 1TB disk on the
-   REAL host: `lsblk` should show sda (WD 1TB) + nvme0n1 (Samsung).
-2. **Run `bootstrap/post-install.sh`** on the host (as root). It now handles
-   the LVM-thin layout:
+1. **Run `bootstrap/post-install.sh`** on the host (as root). It is safe to
+   run now — it refuses to build a pool without a real data disk. It does:
    - creates `vmbr1` NAT bridge (10.10.10.0/24) for test VMs
-   - creates encrypted **ZFS pool `vmhub` on /dev/sda (the 1TB)** with dataset
-     `vmhub/data` (aes-256-gcm) + keyfile `/etc/zfs/keys/vmhub.key`,
-     auto-loaded at boot (no boot password) via systemd unit
-     `zfs-load-vmhub-key.service`
-   - creates scoped `vmhub@pve` API token — token prints ONCE, that's
-     keylessboi's to capture into Doppler as `PVE_TOKEN` + `PVE_HOST`
+   - creates an encrypted **ZFS pool on the largest non-root, non-removable
+     disk** (aes-256-gcm, dataset `vmhub/data`, keyfile
+     `/etc/zfs/keys/vmhub.key`, auto-loaded at boot via systemd). The boot
+     USB is never a candidate.
+   - creates the scoped `vmhub@pve` API token — it prints once; capture it
+     into Doppler as `PVE_TOKEN` + `PVE_HOST`
+2. **Install a data drive into the DL360p** (the P420i bays are empty), then
+   create a RAID-0 logical volume so the OS sees the disk:
+   `ssacli ctrl slot=0 create type=ld drives=allunconfiguredraid raid=0`
+   (adapt the drive list from `ssacli ctrl slot=0 pd all show`). Re-run
+   post-install.sh — it will find the disk and build the encrypted pool.
 3. **Deploy vmhub via Doppler**:
    `doppler run --project proxmox --config prd -- ./deploy/install.sh`
    (renders PVE_HOST/PVE_TOKEN into /etc/vmhub/*.env by reference)
@@ -147,8 +146,6 @@ Key Redfish endpoints:
    across hyprland + real VM adapters.
 5. **Beep**: confirm POST shows 128GB (reseat result); if beep persists, RBSU
    POST Error Beep = Disabled.
-6. keylessboi handoff: brief on PVE_HOST, that PVE_TOKEN is ready to capture,
-   and confirm the 1TB-drive ZFS pool is in place.
 
 ## 7. vmhub architecture (30-second version)
 
@@ -166,11 +163,12 @@ Key Redfish endpoints:
   `docs/reboot-survival.md`, `docs/probe.md`, `docs/gates.md`,
   `docs/setup.md`, `skills/vm-operator/`
 
-## 8. Open questions for keylessboi (in docs/gates.md)
+## 8. Open questions (tracked in docs/gates.md)
 
 1. Which GitHub repos do VMs need write access to? (gates GitHub App scopes)
 2. Real Android device or emulator-only? (gates Android adapter)
-3. The 1TB drive: is it the P420i array or separate SATA? (gates storage setup)
+3. Which physical drive goes into the DL360p's empty P420i bays? (see §6.2 —
+   the server has no internal disk; the earlier "1TB" was the Dell decoy's)
 
 ## 9. Critical invariants (never break)
 
