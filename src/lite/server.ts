@@ -14,6 +14,7 @@ import { serve } from "bun";
 import { mkdirSync } from "node:fs";
 import { LiteDb, resolveDbPath } from "./db.ts";
 import { MockProxmox, type ProxmoxClient } from "./proxmox.ts";
+import { RealProxmox } from "./proxmox-real.ts";
 import { createLiteHandler, type RouterDeps } from "./routes.ts";
 
 export interface LiteServerConfig {
@@ -52,12 +53,16 @@ export function startLiteServer(config: LiteServerConfig = {}): ReturnType<typeo
 }
 
 /**
- * Select the Proxmox client. PVE_HOST/PVE_TOKEN enable the real client once it
- * exists (Phase 3.1); until then both paths return the in-memory mock.
+ * Select the Proxmox client. PVE_HOST/PVE_TOKEN enable the real client
+ * (Phase 3.1); otherwise the in-memory mock is used.
  */
 export function createProxmoxClient(): ProxmoxClient {
   if (process.env.PVE_HOST && process.env.PVE_TOKEN) {
-    // TODO(phase 3.1): RealProxmox({ host: PVE_HOST, token: PVE_TOKEN })
+    return new RealProxmox({
+      host: process.env.PVE_HOST,
+      tokenId: process.env.PVE_TOKEN_ID || "vmhub@pve!automation",
+      token: process.env.PVE_TOKEN,
+    });
   }
   return new MockProxmox();
 }
