@@ -48,11 +48,11 @@ mkdir -p /var/lib/vmhub/leases
 mkdir -p /var/lib/vmhub/artifacts
 chmod 700 /var/lib/vmhub
 
-echo "==> FDE: encrypted VM-data dataset (aes-256-gcm, server-side keyfile)"
-# The installer cannot encrypt. We layer ZFS native encryption on a dedicated
-# dataset. The keyfile lives on the (unencrypted) system pool — on the server,
-# as requested — and is auto-loaded at boot by systemd. No boot password.
-# Any pulled data drive is unreadable without the keyfile.
+echo "==> FDE: encrypted ZFS VM-data pool (aes-256-gcm, server-side keyfile)"
+# Installer used default LVM-thin (system on NVMe). We layer ZFS native
+# encryption on a dedicated VM-data pool (1TB sda, else LVM-backed). Keyfile
+# lives on the unencrypted system disk — server-side, auto-loaded, no boot
+# password. Pulled data drives are unreadable without it.
 KEYS_DIR=/etc/zfs/keys
 mkdir -p "$KEYS_DIR"
 chmod 700 "$KEYS_DIR"
@@ -61,25 +61,38 @@ if [ ! -f "$KEYS_DIR/vmhub.key" ]; then
   chmod 600 "$KEYS_DIR/vmhub.key"
 fi
 
-# Create the encrypted dataset if it does not exist yet.
-if ! zfs list rpool/vmhub >/dev/null 2>&1; then
-  zfs create \
-    -o encryption=aes-256-gcm \
-    -o keyformat=raw \
-    -o keylocation=file://${KEYS_DIR}/vmhub.key \
-    -o compression=lz4 \
-    -o recordsize=16K \
-    -o xattr=sa \
-    -o atime=off \
-    rpool/vmhub
-  zfs load-key rpool/vmhub
-  echo "   created encrypted rpool/vmhub (aes-256-gcm, keyfile auto-load)"
+# Prefer a dedicated 1TB disk (sda); fall back to an LVM-backed pool.
+VM_DATA_POOL=""
+if [ -b /dev/sda ] && [ ! -e /dev/sda1 ]; then
+  if ! zpool list vmhub >/dev/null 2>&1; then
+    zpool create -o ashift=12 vmhub /dev/sda
+    zfs create -o encryption=aes-256-gcm \
+      -o keyformat=raw -o keylocation=file://${KEYS_DIR}/vmhub.key \
+      -o compression=lz4 -o recordsize=16K -o xattr=sa -o atime=off vmhub/data
+    zfs load-key vmhub/data
+    VM_DATA_POOL="vmhub"
+    echo "   created encrypted pool vmhub on /dev/sda"
+  else
+    VM_DATA_POOL="vmhub"
+  fi
+else
+  if ! zpool list vmhub >/dev/null 2>&1; then
+    zpool create vmhub pve-data
+    zfs create -o encryption=aes-256-gcm \
+      -o keyformat=raw -o keylocation=file://${KEYS_DIR}/vmhub.key \
+      -o compression=lz4 -o recordsize=16K -o xattr=sa -o atime=off vmhub/data
+    zfs load-key vmhub/data
+    VM_DATA_POOL="vmhub"
+    echo "   created encrypted pool vmhub on pve-data"
+  else
+    VM_DATA_POOL="vmhub"
+  fi
 fi
 
 # Auto-load the key at boot, before anything mounts the dataset.
 cat > /etc/systemd/system/zfs-load-vmhub-key.service <<EOF
 [Unit]
-Description=Load ZFS encryption key for rpool/vmhub
+Description=Load ZFS encryption key for vmhub/data
 DefaultDependencies=no
 After=systemd-udev-settle.service
 Before=zfs-mount.service
@@ -88,8 +101,8 @@ Requires=systemd-udev-settle.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/sbin/zfs load-key rpool/vmhub
-ExecStartPost=/usr/bin/zfs mount rpool/vmhub
+ExecStart=/usr/sbin/zfs load-key vmhub/data
+ExecStartPost=/usr/bin/zfs mount vmhub/data
 
 [Install]
 WantedBy=multi-user.target
@@ -97,7 +110,7 @@ EOF
 systemctl daemon-reload
 systemctl enable zfs-load-vmhub-key.service
 
-echo "   FDE configured. Verify with: zfs get encryption,keylocation rpool/vmhub"
+echo "   FDE configured. Verify with: zfs get encryption,keylocation vmhub/data"
 
 echo "==> Proxmox API token for vmhub (scoped, never root password)"
 pveum user add vmhub@pve --comment "vmhub control plane"
