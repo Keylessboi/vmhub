@@ -1,0 +1,41 @@
+[Unit]
+Description=vmhub lease reaper — destroys expired VM leases (identity-verified)
+# Reaping must never race provisioning. It reads the same SQLite DB and talks
+# to Proxmox directly, but never creates anything — plain After= is enough.
+# It MUST be able to run even when vmhub-lite is down (independence is the
+# point), so there is deliberately no After= on vmhub-lite.service.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The reaper must outlive a hung VM destroy. Its per-lease operations have
+# internal hard timeouts; this is the outer bound for the whole sweep.
+TimeoutStartSec=30min
+
+# --- environment ---
+# DB resolution order: VMHUB_DB, then <VMHUB_LEASE_DIR>/leases.sqlite, then
+# ./leases/leases.sqlite (must be the SAME file vmhub-lite writes).
+Environment=VMHUB_DB=/srv/vmhub/leases/leases.sqlite
+Environment=VMHUB_LEASE_DIR=/srv/vmhub/leases
+Environment=VMHUB_ARTIFACT_DIR=/srv/vmhub/artifacts
+Environment=VMHUB_DISK_FULL_REFUSAL_PCT=15
+# Proxmox credentials (scoped API token, NOT root password)
+EnvironmentFile=-/etc/vmhub/reaper.env
+
+WorkingDirectory=/srv/vmhub
+ExecStart=/usr/local/bin/vmhub-reaper
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/srv/vmhub
+ProtectHome=true
+PrivateTmp=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

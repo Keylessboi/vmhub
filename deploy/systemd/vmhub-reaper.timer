@@ -1,0 +1,15 @@
+[Unit]
+Description=Run vmhub-reaper hourly
+
+[Timer]
+# First run 1 minute after boot, then every hour.
+# OnBootSec=1min means: after a REBOOT, the reaper sweeps within 60 seconds —
+# any lease that was mid-life during the reboot is re-evaluated immediately.
+OnBootSec=1min
+OnUnitActiveSec=1h
+# Do not catch up a backlog of missed runs after a long downtime.
+Persistent=false
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

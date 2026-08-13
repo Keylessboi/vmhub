@@ -1,0 +1,37 @@
+[Unit]
+Description=vmhub-lite — control plane (8 REST endpoints, SQLite, Proxmox client)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Control plane: must be up before the reaper's first sweep can race it.
+Type=simple
+Restart=always
+RestartSec=3
+TimeoutStartSec=30
+
+# --- environment ---
+# DB + dirs live under /srv/vmhub so they survive host reboots.
+Environment=VMHUB_DB=/srv/vmhub/leases/leases.sqlite
+Environment=VMHUB_LEASE_DIR=/srv/vmhub/leases
+Environment=VMHUB_ARTIFACT_DIR=/srv/vmhub/artifacts
+Environment=VMHUB_DISK_FULL_REFUSAL_PCT=15
+Environment=VMHUB_PORT=8787
+EnvironmentFile=-/etc/vmhub/lite.env
+
+WorkingDirectory=/srv/vmhub
+ExecStart=/usr/local/bin/vmhub-lite
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/srv/vmhub
+ProtectHome=true
+PrivateTmp=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
