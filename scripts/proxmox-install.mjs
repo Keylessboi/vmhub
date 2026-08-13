@@ -28,8 +28,7 @@
 import { createRequire } from 'node:module';
 const require = createRequire('/usr/lib/node_modules/omniroute/');
 const { chromium } = require('playwright');
-import { readFileSync, existsSync } from 'node:fs';
-import os from 'node:os';
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 
@@ -328,25 +327,22 @@ async function main() {
   console.log('vmhub proxmox-install — autonomous installer via iLO');
   console.log(`  iLO: ${CFG.iloHost}  ISO: ${CFG.isoUrl.slice(0, 60)}...`);
 
-  clearSessions();
-  stepMountMedia()
-    .then(() => stepPowerOn())
-    .then(() => stepDriveWizard())
-    .then(() => {
-      console.log('\nInstaller drive complete. Screenshots in', CFG.screenshotDir);
-      console.log('If the wizard needs more input (manual mode), re-run with --drive and read the shots.');
-    })
-    .catch((e) => {
-      console.error('\nFAILED:', e.message);
-      process.exitCode = 1;
-    });
+  try {
+    clearSessions();
+    await stepMountMedia();
+    await stepPowerOn();
+    await stepDriveWizard();
+    console.log('\nInstaller drive complete. Screenshots in', CFG.screenshotDir);
+    console.log('If the wizard needs more input (manual mode), re-run with --drive and read the shots.');
+  } catch (e) {
+    console.error('\nFAILED:', e.message);
+    process.exitCode = 1;
+  }
 }
 
 // ---------------------------------------------------------------------------
 // util
 // ---------------------------------------------------------------------------
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-function mkdirSync(p) { try { require('node:fs').mkdirSync(p, { recursive: true }); } catch {} }
-function writeFileSync(p, s) { require('node:fs').writeFileSync(p, s); }
 
 main();
