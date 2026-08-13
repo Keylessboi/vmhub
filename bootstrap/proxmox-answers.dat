@@ -1,0 +1,49 @@
+# Proxmox VE automated install answer file — vmhub homeserver (DL360p Gen8)
+#
+# Usage: proxmox-auto-install-assistant prepare-iso proxmox-ve_9.x.iso \
+#            --answer-file proxmox-answers.dat
+#
+# NOTE ON STORAGE: this Gen8 has a SMART Array RAID controller. ZFS needs the
+# controller in HBA/IT mode (or passthrough) to see individual disks. If the
+# controller is in RAID mode, either (a) switch it to HBA mode in the SPP/BIOS
+# first, or (b) change disk-layout below to match a RAID volume. VERIFY the
+# controller mode before running the installer — this is the one hardware fact
+# iLO Redfish cannot report on firmware 2.82.
+
+global:
+    keyboard: en-us
+    country: us
+    fqdn: vmhub.lan
+    mailto: travis@vmhub.lan
+    timezone: America/New_York
+    root_password: "__VMHUB_ROOT_PW__"   # replaced by bootstrap — never committed
+
+# Disk layout: ZFS rpool (mirror if 2+ physical disks visible after HBA mode)
+disk-layout:
+    filesystem: zfs
+    disk_list:
+        - node0:all   # Proxmox auto-assigns; use explicit ids if HBA mode confirmed
+    zfs:
+        ashift: 12
+        compress: lz4
+        pool: rpool
+        # raidz|mirror|single — set to mirror when 2 drives in HBA mode
+        type: single
+
+# Network: vmbr0 on the LAN port, vmbr1 dedicated NAT for test VMs
+network:
+    source: from-dhcp
+    interface: vmbr0
+    cidr: 192.168.1.216/24     # statically reassign after first boot if desired
+    gateway: 192.168.1.1
+    dns:
+        - 192.168.1.1
+        - 1.1.1.1
+    searchdomain: lan
+
+# Optional vmbr1 (NAT for test VMs) — created by post-install.sh instead,
+# because the answer file does not define extra bridges cleanly on 9.x.
+
+# Restrict installer to the local disk to avoid touching any other attached media
+options:
+    no-reboot: false
