@@ -40,7 +40,7 @@ disk-layout:
 network:
     source: from-dhcp
     interface: vmbr0
-    cidr: 192.168.1.216/24     # statically reassign after first boot if desired
+    cidr: 192.168.1.220/24     # static host IP — NOT .216 (that's the iLO mgmt NIC)
     gateway: 192.168.1.1
     dns:
         - 192.168.1.1
