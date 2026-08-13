@@ -3,6 +3,9 @@
 # Idempotent: safe to re-run. Run as root on the host that runs vmhub-lite
 # and vmhub-reaper (the Proxmox host, or LO's desktop for the mock stage).
 #
+# Run through Doppler so secrets are injected by reference, never hardcoded:
+#   doppler run --project proxmox --config prd -- ./deploy/install.sh
+#
 # Reboot survival contract (what this script guarantees):
 #   1. vmhub-lite  starts on boot          (systemd, Restart=always)
 #   2. vmhub-reaper sweeps 60s after boot  (systemd timer OnBootSec=1min)
@@ -37,21 +40,19 @@ mkdir -p "$DATADIR/leases" "$DATADIR/artifacts"
 mkdir -p "$CONFDIR"
 chmod 700 "$DATADIR" "$CONFDIR"
 
-echo "==> env files (only create if missing — never overwrite secrets)"
+echo "==> env files (rendered from Doppler vars by reference, 0600)"
+# Run via: doppler run --project proxmox --config prd -- ./deploy/install.sh
+# Values come from injected env vars; nothing is hardcoded or echoed.
 if [ ! -f "$CONFDIR/lite.env" ]; then
-  cat > "$CONFDIR/lite.env" <<'EOF'
-# vmhub-lite environment. Fill PVE_HOST/PVE_TOKEN for real Proxmox.
-# For mock mode (no server yet) leave PVE_* empty — lite uses MockProxmox.
-PVE_HOST=
-PVE_TOKEN=
+  cat > "$CONFDIR/lite.env" <<EOF
+PVE_HOST=${PVE_HOST:-}
+PVE_TOKEN=${PVE_TOKEN:-}
 EOF
 fi
 if [ ! -f "$CONFDIR/reaper.env" ]; then
-  cat > "$CONFDIR/reaper.env" <<'EOF'
-# vmhub-reaper environment. Requires a SCOPED Proxmox token with
-# read+stop+destroy on /vms (never create/clone).
-PVE_HOST=
-PVE_TOKEN=
+  cat > "$CONFDIR/reaper.env" <<EOF
+PVE_HOST=${PVE_HOST:-}
+PVE_TOKEN=${PVE_TOKEN:-}
 EOF
 fi
 chmod 600 "$CONFDIR/lite.env" "$CONFDIR/reaper.env"
