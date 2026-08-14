@@ -175,10 +175,34 @@ Template: VMID **2200**, `qm template` converted disks to
 
 ## windows-11-24h2 (VMID 2100 → golden) — build steps
 
-1. Install Win11 Enterprise Evaluation (manual, UEFI/OVMF, proper partition layout).
-2. Local account: vmhub / vmhub-admin-2026! / security answers "idk".
-3. **Legal activation at this step** — operator action, not documented here.
-4. Install virtio drivers (virtio-win ISO), disable net0 firewall.
-5. Install CursorTouch v0.8.5 (uv tool install windows-mcp==0.8.5),
-   streamable-http on 0.0.0.0:8000 with auth key.
-6. Convert to golden template.
+1. **Create the VM** (hardware matters):
+   - machine `q35`, BIOS `OVMF (UEFI)`, EFI disk with pre-enrolled keys
+   - TPM State v2.0 (Win11 requirement), CPU `host`, 8 cores, 16GB
+   - disk on **SATA** (NOT virtio-scsi — Windows has no native driver during
+     install), 64GB, fully unallocated
+   - network virtio on vmbr1
+2. **Install Win11 Enterprise Evaluation** (manual):
+   - boot ISO, at "Press any key to boot from CD" press once, then **stop
+     pressing keys** — key-spam on reboot re-boots the ISO and causes the
+     "computer restarted unexpectedly" error
+   - disk screen: select **unallocated space → Next** (Windows creates its own
+     EFI+MSR+Windows layout — do NOT pre-partition with diskpart; the earlier
+     single-primary GPT layout caused the same restart-loop error)
+3. **Local account**: vmhub / vmhub-admin-2026! / security answers "idk".
+4. **Legal activation at this step** — operator action, not documented here.
+5. **Virtio drivers**: attach `iso-store:iso/virtio-win.iso`, run
+   `virtio-win-guest-tools.exe` (fast disk/net). Disable Windows firewall:
+   `netsh advfirewall set allprofiles state off`. Drop `firewall=1` from net0.
+6. **CursorTouch v0.8.5** (Windows-MCP):
+   - `winget install Python.Python.3.13 --silent`, `pip install uv`,
+     `uv tool install windows-mcp==0.8.5`
+   - `windows-mcp auth --transport streamable-http --host 0.0.0.0 --port 8000`
+     → writes `~/.windows-mcp/config.toml` with the auth key (capture it —
+     it's the CursorTouch secret for the adapter)
+   - serve on `0.0.0.0:8000` (non-loopback needs the auth key, by design):
+     `windows-mcp serve --transport streamable-http --host 0.0.0.0 --port 8000`
+   - adapter connects to `http://<vm-ip>:8000/mcp/` with `Bearer <key>`
+   - set `ANONYMIZED_TELEMETRY=false` (cloned goldens shouldn't phone home)
+7. **Convert to golden template** (after activation). The adapter
+   (adapters/windows/index.ts) is wired for streamable-http + Bearer auth;
+   set `CURSORTOUCH_AUTH_KEY` via Doppler/env.
