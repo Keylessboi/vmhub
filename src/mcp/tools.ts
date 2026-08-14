@@ -5,7 +5,7 @@
  */
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import type { DesktopAdapter, Vm } from '../shared/types.ts';
+import type { DesktopAdapter, Template, Vm } from '../shared/types.ts';
 import type { AdapterRegistry } from '../../adapters/index.ts';
 import type { LiteClient } from './lite-client.ts';
 import { assertToolAvailable, capabilityReport, getTemplate, templateCatalog, type VmToolName } from './capabilities.ts';
@@ -57,8 +57,22 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
     async () => {
       const start = Date.now();
       try {
-        const templates = templateCatalog(deps.registry);
-        return okResult('vm_list_templates', { templates }, start);
+        // Merge the local adapter matrix with lite's REAL template catalog
+        // (which mirrors the goldens on the Proxmox host). Real templates win
+        // for their id; adapters with no live golden still appear as stubs so
+        // nothing is hidden.
+        const local = templateCatalog(deps.registry);
+        let real: Template[] = [];
+        try {
+          real = await deps.lite.getTemplates();
+        } catch {
+          real = []; // lite unreachable → degrade to the local matrix, not an error
+        }
+        const realById = new Map(real.map((t) => [t.id, t]));
+        const merged = local.map((t) => realById.get(t.id) ?? t);
+        const localIds = new Set(local.map((t) => t.id));
+        const liteOnly = real.filter((r) => !localIds.has(r.id));
+        return okResult('vm_list_templates', { templates: [...merged, ...liteOnly] }, start);
       } catch (e) {
         return errorResult('vm_list_templates', toVmError(e, 'vm_list_templates'), start);
       }
