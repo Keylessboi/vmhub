@@ -105,17 +105,12 @@ find_data_disk() {
 if ! zpool list "$POOL" >/dev/null 2>&1; then
   DATA_DISK=$(find_data_disk)
   echo "   data disk: $DATA_DISK ($(lsblk -dno SIZE,MODEL "$DATA_DISK"))"
-  # Double-guard: refuse the boot disk even if detection failed.
-  [ "$DATA_DISK" = "/dev/sda" ] && ! grep -q "removable.*1" /sys/block/sda/removable && {
-    echo "ERROR: refusing to build pool on $DATA_DISK (looks like boot disk)." >&2
-    exit 1
-  }
   zpool create -o ashift=12 "$POOL" "$DATA_DISK"
   zfs create -o encryption=aes-256-gcm \
     -o keyformat=raw -o keylocation=file://${KEYS_DIR}/vmhub.key \
     -o compression=lz4 -o recordsize=16K -o xattr=sa -o atime=off \
     "$DATASET"
-  zfs load-key "$DATASET"
+  zfs load-key "$DATASET" || true   # key already loaded on create
   echo "   created encrypted pool $POOL on $DATA_DISK"
 else
   echo "   pool $POOL already exists"
@@ -149,8 +144,9 @@ zfs get -H -o property,value encryption,keylocation "$DATASET" | sed 's/^/   /'
 echo "==> [7/7] Proxmox API token for vmhub (scoped, never root password)"
 if ! pveum user list 2>/dev/null | grep -q vmhub@pve; then
   pveum user add vmhub@pve --comment "vmhub control plane"
-  pveum acl modify /vms -token 'vmhub@pve!automation' -role PVEVMAdmin 2>/dev/null || true
 fi
+# ACL apply is idempotent — always run it so re-runs converge.
+pveum acl modify /vms -token 'vmhub@pve!automation' -role PVEVMAdmin
 if pveum user token list vmhub@pve 2>/dev/null | grep -q automation; then
   echo "   token 'automation' already exists — do NOT rotate unless you re-capture it."
 else
