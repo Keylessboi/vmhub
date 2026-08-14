@@ -1,0 +1,9 @@
+[Unit]
+Description=Wake Proxmox host via iLO Redfish
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/travis/Projects/vmhub/scripts/vmhub-wake.sh
+User=travis
