@@ -177,7 +177,7 @@ Template: VMID **2200**, `qm template` converted disks to
 
 1. Install Win11 Enterprise Evaluation (manual, UEFI/OVMF, proper partition layout).
 2. Local account: vmhub / vmhub-admin-2026! / security answers "idk".
-3. **ACTIVATE WINDOWS AT THIS STEP** — operator action, not documented here.
+3. **Legal activation at this step** — operator action, not documented here.
 4. Install virtio drivers (virtio-win ISO), disable net0 firewall.
 5. Install CursorTouch v0.8.5 (uv tool install windows-mcp==0.8.5),
    streamable-http on 0.0.0.0:8000 with auth key.
