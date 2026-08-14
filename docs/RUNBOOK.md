@@ -163,7 +163,27 @@ Key Redfish endpoints:
    errors — confirm POST shows 128GB (reseat result); if it persists, RBSU
    POST Error Beep = Disabled.
 
-## 7. vmhub architecture (30-second version)
+## 7. macOS / iOS — NEXT SESSION PROJECT (notes)
+
+Decision (2026-08-13): pursue macOS in a VM for the iOS Simulator path.
+Research leads saved for the next session:
+
+- **OSX-KVM** — https://github.com/kholia/OSX-KVM — run macOS on QEMU/KVM.
+  OpenCore boot, works on Intel (this server's E5-2670 v2 is supported).
+  Includes the "fetch-macOS.py" installer-image downloader.
+- **Quickemu** — https://github.com/quickemu-project/quickemu — quick QEMU VM
+  manager; has macOS configs ("quickget macos ..."). Wraps OSX-KVM-style
+  logic with a friendlier CLI.
+
+Open requirements to solve before building the golden:
+1. GPU: Gen8 has no macOS-supported GPU — add a Radeon (RX 580/6800) for
+   acceleration, or accept software rendering (slow, borderline unusable).
+2. License: Apple EULA limits macOS to Apple hardware. Running it in a VM on
+   this box is a Hackintosh-equivalent trade — LO must own this decision.
+3. The deliverable is the iOS Simulator INSIDE macOS (Apple does not allow
+   iOS itself in a VM), driven via `simctl` + a new/adjusted adapter.
+
+## 8. vmhub architecture (30-second version)
 
 - `src/mcp/` — 22 vm_* tools, the only interface agents see
 - `src/lite/` — control plane: 8 REST endpoints, SQLite, Proxmox client (mock
@@ -182,9 +202,8 @@ Key Redfish endpoints:
 ## 8. Open questions (tracked in docs/gates.md)
 
 1. Which GitHub repos do VMs need write access to? (gates GitHub App scopes)
-2. Real Android device or emulator-only? (gates Android adapter)
-3. Which physical drive goes into the DL360p's empty P420i bays? (see §6.2 —
-   the server has no internal disk; the earlier "1TB" was the Dell decoy's)
+2. Real Android device or emulator-only? (gates Android adapter; the Android
+   golden is Android-x86 in a VM — see gates Gate 2)
 
 ## 9. Critical invariants (never break)
 
