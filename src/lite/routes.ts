@@ -302,6 +302,7 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
     memoryMb: tpl.ramMb,
   });
   vm.vmid = pvm.vmid;
+  vm.ip = pvm.ip;
   // A "ready" lease must be a powered-on VM, not a stopped clone.
   try {
     await ctx.proxmox.startVm(pvm.vmid);

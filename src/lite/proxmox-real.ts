@@ -24,9 +24,18 @@ export interface RealProxmoxOptions {
   basePath?: string;
   /** Verify TLS. Proxmox uses a self-signed cert by default → default false. */
   insecure?: boolean;
+  /** NAT subnet for VM transport. Default 10.10.10.0/24 (vmbr1). */
+  vmSubnet?: string;
+  /** First usable host IP in the VM subnet. */
+  vmGateway?: string;
+  /** First IP handed out to VMs (default 10.10.10.50). */
+  vmIpStart?: string;
 }
 
 const DEFAULT_TOKEN_ID = "vmhub@pve!automation";
+const VM_NETWORK = "10.10.10.0/24";
+const VM_GATEWAY = "10.10.10.1";
+const VM_IP_START = 50; // 10.10.10.50 — first pool address for leases
 
 function vmError(code: VmError["code"], message: string, retryable: boolean, hint: VmError["hint"], detail?: string): VmError {
   return { code, message, retryable, hint, detail };
@@ -34,7 +43,11 @@ function vmError(code: VmError["code"], message: string, retryable: boolean, hin
 
 export class RealProxmox implements ProxmoxClient {
   private readonly opts: Required<Pick<RealProxmoxOptions, "host" | "tokenId" | "token" | "basePath" | "insecure">> & { node?: string };
+  private readonly vmSubnetMask: string;
+  private readonly vmGateway: string;
+  private readonly vmIpStart: number;
   private nodePromise: Promise<string> | null = null;
+  private readonly usedIps = new Set<string>();
 
   constructor(options: RealProxmoxOptions) {
     this.opts = {
@@ -45,6 +58,11 @@ export class RealProxmox implements ProxmoxClient {
       insecure: options.insecure ?? true,
       node: options.node,
     };
+    const cidr = options.vmSubnet ?? VM_NETWORK;
+    this.vmSubnetMask = cidr.split("/")[1] ?? "24";
+    this.vmGateway = options.vmGateway ?? VM_GATEWAY;
+    const start = options.vmIpStart ? Number(options.vmIpStart.split(".").pop()) : VM_IP_START;
+    this.vmIpStart = Number.isFinite(start) ? start : VM_IP_START;
   }
 
   private authHeader(): string {
@@ -92,7 +110,7 @@ export class RealProxmox implements ProxmoxClient {
     return config.tags.split(";").map((t) => t.trim()).filter(Boolean);
   }
 
-  private toVm(q: any, tags: string[]): ProxmoxVm {
+  private toVm(q: any, tags: string[], ip?: string): ProxmoxVm {
     const proxmoxTag = tags.find((t) => t.startsWith("vmhub-")) ?? "";
     return {
       vmid: Number(q.vmid),
@@ -100,9 +118,22 @@ export class RealProxmox implements ProxmoxClient {
       templateId: q.template ?? "",
       tags,
       proxmoxTag,
+      ip,
       status: (q.status as ProxmoxVmStatus) || "stopped",
       createdAt: q.uptime ? Date.now() - Number(q.uptime) * 1000 : Date.now(),
     };
+  }
+
+  /** Allocate the next free VM IP in the pool (10.10.10.50+). */
+  private allocVmIp(): string {
+    for (let i = this.vmIpStart; i < 200; i++) {
+      const ip = `10.10.10.${i}`;
+      if (!this.usedIps.has(ip)) {
+        this.usedIps.add(ip);
+        return ip;
+      }
+    }
+    throw vmError("HOST_CAPACITY", "vmhub IP pool exhausted (10.10.10.50-199)", false, "no-retry");
   }
 
   async listTemplates(): Promise<Template[]> {
@@ -145,12 +176,15 @@ export class RealProxmox implements ProxmoxClient {
     // The clone endpoint rejects `tags`, but the tag is the identity doctrine
     // (reaper matches vmhub-* tags, never VMIDs). Set it right after cloning,
     // before the VM can be observed as tag-less by any sweep.
+    // A static IP is set the same way: deterministic transport, no DHCP race.
+    const vmIp = this.allocVmIp();
     await this.request("POST", `/nodes/${node}/qemu/${vmid}/config`, {
       tags: input.proxmoxTag,
+      ipconfig0: `ip=${vmIp}/${this.vmSubnetMask},gw=${this.vmGateway}`,
     });
     const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string };
     const tags = this.parseTags(config);
-    return this.toVm({ vmid, name: input.name, status: "provisioning" }, tags);
+    return this.toVm({ vmid, name: input.name, status: "provisioning" }, tags, vmIp);
   }
 
   async startVm(vmid: number): Promise<ProxmoxVm> {

@@ -115,6 +115,8 @@ export interface Vm {
   status: VmStatus;
   /** NAT host port for ssh/agent access. */
   sshPort?: number;
+  /** Static NAT IP on the VM network (vmbr1, 10.10.10.x) — the transport address. */
+  ip?: string;
   /** Host-side lease-scratch dir for artifacts. */
   scratchDir?: string;
   createdAt: number;

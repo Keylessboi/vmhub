@@ -28,6 +28,8 @@ export interface ProxmoxVm {
    * identity. Always present in `tags`; kept as a field for convenience.
    */
   proxmoxTag: string;
+  /** Static NAT IP the VM was assigned (vmbr1, 10.10.10.x) — the transport address. */
+  ip?: string;
   status: ProxmoxVmStatus;
   createdAt: number;
 }

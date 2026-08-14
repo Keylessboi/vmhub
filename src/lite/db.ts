@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS vms (
   namePrefix   TEXT NOT NULL,
   status       TEXT NOT NULL,
   sshPort      INTEGER,
+  ip           TEXT,
   scratchDir   TEXT,
   createdAt    INTEGER NOT NULL
 );
@@ -116,7 +117,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
 `;
 
 const VMS_COLUMNS =
-  "uuid, vmid, templateId, adapter, capabilities, proxmoxTag, namePrefix, status, sshPort, scratchDir, createdAt";
+  "uuid, vmid, templateId, adapter, capabilities, proxmoxTag, namePrefix, status, sshPort, ip, scratchDir, createdAt";
 const LEASES_COLUMNS =
   "vmId, owner, requestId, status, expiresAt, lastRenewedAt, renewCount, maxLifetimeMs, createdAt";
 const ARTIFACTS_COLUMNS = "id, leaseId, hostPath, sizeBytes, inFlight, createdAt";
@@ -130,6 +131,11 @@ export class LiteDb {
     }
     this.db = new dbCtor(path);
     this.db.exec(SCHEMA);
+    // Idempotent migration: add columns introduced after the table existed.
+    const cols = this.db.prepare("PRAGMA table_info(vms)").all() as { name: string }[];
+    if (!cols.some((c) => c.name === "ip")) {
+      this.db.exec("ALTER TABLE vms ADD COLUMN ip TEXT;");
+    }
   }
 
   close(): void {
@@ -144,7 +150,7 @@ export class LiteDb {
     this.db
       .prepare(
         `INSERT INTO vms (${VMS_COLUMNS})
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         vm.uuid,
@@ -156,6 +162,7 @@ export class LiteDb {
         vm.namePrefix,
         vm.status,
         vm.sshPort ?? null,
+        vm.ip ?? null,
         vm.scratchDir ?? null,
         vm.createdAt,
       );
@@ -321,6 +328,7 @@ function rowToVm(row: unknown): VmRow | null {
     namePrefix: String(r.namePrefix),
     status: String(r.status) as Vm["status"],
     sshPort: r.sshPort == null ? undefined : Number(r.sshPort),
+    ip: r.ip == null ? undefined : String(r.ip),
     scratchDir: r.scratchDir == null ? undefined : String(r.scratchDir),
     createdAt: Number(r.createdAt),
   };

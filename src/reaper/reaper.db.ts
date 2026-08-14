@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS vms (
   namePrefix   TEXT NOT NULL,
   status       TEXT NOT NULL,
   sshPort      INTEGER,
+  ip           TEXT,
   scratchDir   TEXT,
   createdAt    INTEGER NOT NULL
 );
@@ -120,6 +121,7 @@ interface VmRow {
   namePrefix: string;
   status: string;
   sshPort: number | null;
+  ip: string | null;
   scratchDir: string | null;
   createdAt: number;
 }
@@ -163,6 +165,7 @@ function parseVmRow(r: Record<string, unknown>): Vm {
     namePrefix: row.namePrefix,
     status: row.status as VmStatus,
     sshPort: row.sshPort ?? undefined,
+    ip: row.ip ?? undefined,
     scratchDir: row.scratchDir ?? undefined,
     createdAt: row.createdAt,
   };
@@ -222,7 +225,7 @@ class SqliteReaperDb implements ReaperDb {
     const rows = this.#db
       .prepare(
         `SELECT v.uuid, v.vmid, v.templateId, v.adapter, v.capabilities, v.proxmoxTag,
-                v.namePrefix, v.status, v.sshPort, v.scratchDir, v.createdAt,
+                v.namePrefix, v.status, v.sshPort, v.ip, v.scratchDir, v.createdAt,
                 l.vmId, l.owner, l.requestId, l.status AS leaseStatus, l.expiresAt,
                 l.lastRenewedAt, l.renewCount, l.maxLifetimeMs
          FROM leases l
