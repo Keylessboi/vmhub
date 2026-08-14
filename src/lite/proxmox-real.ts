@@ -46,7 +46,7 @@ function vmError(code: VmError["code"], message: string, retryable: boolean, hin
  * follow the catalog convention: "<os>-<version>" (hyprland-2404, x11-...,
  * windows-11-24h2, android-...). Unknown names fall back to "headless".
  */
-function osFromTemplateName(name: string | undefined): Template["os"] {
+export function osFromTemplateName(name: string | undefined): Template["os"] {
   const n = (name ?? "").toLowerCase();
   if (n.startsWith("hyprland")) return "hyprland";
   if (n.startsWith("windows") || n.startsWith("win")) return "windows";
