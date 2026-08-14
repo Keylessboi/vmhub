@@ -34,6 +34,7 @@ import type {
 } from '../../src/shared/types.ts';
 import { CAPABILITIES } from '../../src/shared/types.ts';
 import { vmError } from '../../src/mcp/errors.ts';
+import { vmSshMcpTransport } from '../transport.ts';
 
 /** Default compiled binary — override with HYPRLAND_MCP_BIN. */
 export const DEFAULT_HYPRLAND_MCP_BIN = '/home/travis/Projects/hyprland-mcp/dist/hyprland-mcp';
@@ -44,17 +45,7 @@ export function hyprlandMcpBin(env: NodeJS.ProcessEnv = process.env): string {
 
 /** In-VM launcher path installed at golden build (runs bun-baseline + session env). */
 export const IN_VM_LAUNCHER = '/usr/local/bin/launch-hypr-mcp';
-
-/** SSH user for VM transport (root by default; cloud-init injects the key). */
-export function vmSshUser(env: NodeJS.ProcessEnv = process.env): string {
-  return env.VMHUB_SSH_USER ?? 'root';
-}
-
-/** ProxyJump target through the Proxmox host: "root@192.168.1.220" by default. */
-export function sshJumpTarget(env: NodeJS.ProcessEnv = process.env): string {
-  const host = env.VMHUB_JUMP_HOST ?? '192.168.1.220';
-  return `${vmSshUser(env)}@${host}`;
-}
+export { sshJumpTarget, vmSshUser } from '../transport.ts';
 
 /**
  * Capability → hyprland-mcp tool mapping. Every vm_* operation delegates to
@@ -146,17 +137,7 @@ export class HyprlandAdapter implements DesktopAdapter {
    */
   private buildTransport(vm: Vm): StdioClientTransport {
     if (vm.ip) {
-      const jump = sshJumpTarget(); // "root@192.168.1.220" by default
-      return new StdioClientTransport({
-        command: 'ssh',
-        args: [
-          '-T',
-          '-o', 'StrictHostKeyChecking=no',
-          '-o', `ProxyJump=${jump}`,
-          `${vmSshUser()}@${vm.ip}`,
-          IN_VM_LAUNCHER,
-        ],
-      });
+      return vmSshMcpTransport(vm, IN_VM_LAUNCHER);
     }
     const bin = hyprlandMcpBin();
     if (!existsSync(bin)) {

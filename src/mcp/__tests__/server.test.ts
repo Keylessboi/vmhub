@@ -234,17 +234,27 @@ describe('template catalog', () => {
     return { client };
   }
 
-  it('lists all 6 adapters with honest availability and reasons', async () => {
+  it('lists all 7 adapters with honest availability and reasons', async () => {
     const { client } = await setupFull();
     const res = await client.callTool({ name: 'vm_list_templates', arguments: {} });
     const sc = res.structuredContent as { result?: { templates?: Template[] } };
     const templates = sc.result?.templates ?? [];
     const ids = templates.map((t) => t.id).sort();
-    expect(ids).toEqual(['android', 'hyprland', 'ios', 'macos', 'windows', 'x11']);
+    expect(ids).toEqual(['android', 'headless', 'hyprland', 'ios', 'macos', 'windows', 'x11']);
 
     const hyprland = templates.find((t) => t.id === 'hyprland');
     expect(hyprland?.availability).toBe('available');
     expect(hyprland?.capabilities.length).toBeGreaterThan(8);
+
+    const x11 = templates.find((t) => t.id === 'x11');
+    expect(x11?.availability).toBe('available');
+    expect(x11?.capabilities).toContain(CAPABILITIES.screenshot);
+    expect(x11?.capabilities).toContain(CAPABILITIES.click);
+    expect(x11?.capabilities).not.toContain(CAPABILITIES.launch);
+
+    const headless = templates.find((t) => t.id === 'headless');
+    expect(headless?.availability).toBe('available');
+    expect(headless?.capabilities).toEqual([]);
 
     const ios = templates.find((t) => t.id === 'ios');
     expect(ios?.availability).toBe('stub');

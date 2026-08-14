@@ -117,16 +117,17 @@ interface TemplateMeta {
 
 /** Resource hints per adapter. Matrix metadata, not part of the machine contract. */
 const TEMPLATE_META: Record<string, TemplateMeta> = {
-  hyprland: { ramMb: 0, vcpus: 0, nestedVirt: false, notes: 'Local desktop passthrough — the host Hyprland session, no VM resources.' },
-  x11: { ramMb: 4096, vcpus: 2, nestedVirt: true, notes: 'X11 desktop VM (mock for E2E).' },
+  hyprland: { ramMb: 4096, vcpus: 2, nestedVirt: false, notes: 'Hyprland desktop VM (golden hyprland-2404).' },
+  x11: { ramMb: 4096, vcpus: 2, nestedVirt: false, notes: 'X11 desktop VM (golden x11-2404) via computer-use-linux.' },
+  headless: { ramMb: 4096, vcpus: 2, nestedVirt: false, notes: 'Headless Linux golden (debian-13-golden): exec/SSH only, no display tools.' },
   windows: { ramMb: 8192, vcpus: 4, nestedVirt: true, notes: 'Windows desktop VM via in-VM CursorTouch (mock for E2E).' },
   macos: { ramMb: 8192, vcpus: 4, nestedVirt: true, notes: 'macOS desktop VM via in-VM mac-control-mcp (mock for E2E).' },
   android: { ramMb: 4096, vcpus: 2, nestedVirt: true, notes: 'Android via host-side ADB (mock for E2E).' },
   ios: { ramMb: 2048, vcpus: 2, nestedVirt: true, notes: 'iOS has no remote-control path yet.' },
 };
 
-/** Only the local desktop is production-real in Phase 2. */
-const AVAILABLE_ADAPTERS: ReadonlySet<string> = new Set(['hyprland']);
+/** Production-real adapters: the Linux goldens (hyprland, x11) + the headless no-op. */
+const AVAILABLE_ADAPTERS: ReadonlySet<string> = new Set(['hyprland', 'x11', 'headless']);
 
 /** availability reason text for stub adapters — never hidden from agents. */
 function stubReason(adapterId: string, os: WindowingSystem): string {

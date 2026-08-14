@@ -57,6 +57,15 @@ function osFromTemplateName(name: string | undefined): Template["os"] {
   return "headless";
 }
 
+/**
+ * Capability surface a clone of this template will have, per adapter OS.
+ * Headless goldens (debian-13-golden) get exec only — never a display claim.
+ */
+function templateCapabilities(os: Template["os"]): Template["capabilities"] {
+  if (os === "headless") return ["exec"];
+  return ["screenshot", "inspect", "list_windows", "click", "type", "key", "drag", "exec"];
+}
+
 export class RealProxmox implements ProxmoxClient {
   private readonly opts: Required<Pick<RealProxmoxOptions, "host" | "tokenId" | "token" | "basePath" | "insecure">> & { node?: string };
   private readonly vmSubnetMask: string;
@@ -160,16 +169,19 @@ export class RealProxmox implements ProxmoxClient {
       vmid: number; name?: string; template?: number; maxmem?: number; maxcpu?: number;
     }[];
     const templates = vms?.filter((v) => Number(v.template) === 1) ?? [];
-    return templates.map((t) => ({
-      id: String(t.vmid),
-      os: osFromTemplateName(t.name),
-      availability: "available" as const,
-      capabilities: ["screenshot", "exec"] as any,
-      ramMb: Math.round(Number(t.maxmem) / (1024 * 1024)) || 4096,
-      vcpus: Number(t.maxcpu) || 2,
-      nestedVirt: false,
-      notes: t.name ? `Golden template ${t.name}` : `Real Proxmox VM template ${t.vmid}`,
-    }));
+    return templates.map((t) => {
+      const os = osFromTemplateName(t.name);
+      return {
+        id: String(t.vmid),
+        os,
+        availability: "available" as const,
+        capabilities: templateCapabilities(os),
+        ramMb: Math.round(Number(t.maxmem) / (1024 * 1024)) || 4096,
+        vcpus: Number(t.maxcpu) || 2,
+        nestedVirt: false,
+        notes: t.name ? `Golden template ${t.name}` : `Real Proxmox VM template ${t.vmid}`,
+      };
+    });
   }
 
   async createVm(input: CreateProxmoxVmInput): Promise<ProxmoxVm> {
