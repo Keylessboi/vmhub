@@ -199,7 +199,7 @@ function extractImage(content: unknown[]): { data: Buffer; mime: string } {
 }
 
 /** Pull the text from an MCP text content block, if present. */
-function textContent(content: unknown[]): string | undefined {
+export function textContent(content: unknown[]): string | undefined {
   const block = content.find(
     (c): c is { type: 'text'; text: string } => typeof c === 'object' && c !== null && (c as { type: string }).type === 'text' && typeof (c as { text?: unknown }).text === 'string',
   );

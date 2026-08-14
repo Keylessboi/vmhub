@@ -262,10 +262,11 @@ describe('template catalog', () => {
     expect(ios?.reason).toBeTruthy();
 
     const windows = templates.find((t) => t.id === 'windows');
-    expect(windows?.availability).toBe('stub');
-    expect(windows?.reason).toContain('mock');
+    expect(windows?.availability).toBe('available');
     expect(windows?.capabilities).toContain(CAPABILITIES.screenshot);
-    expect(windows?.capabilities).toContain(CAPABILITIES.putFile);
+    expect(windows?.capabilities).toContain(CAPABILITIES.click);
+    // File transfer is not on the real CursorTouch surface (no sftp tool).
+    expect(windows?.capabilities).not.toContain(CAPABILITIES.putFile);
   });
 
   it('unknown template id → typed NOT_FOUND', async () => {
