@@ -52,8 +52,7 @@ export class RealProxmox implements ProxmoxClient {
   }
 
   private url(pathname: string): string {
-    const scheme = this.opts.insecure ? "https" : "https"; // Proxmox is TLS-only
-    return `${scheme}://${this.opts.host}${this.opts.basePath}${pathname}`;
+    return `https://${this.opts.host}${this.opts.basePath}${pathname}`; // Proxmox is TLS-only
   }
 
   private async request(method: string, pathname: string, body?: Record<string, unknown>): Promise<any> {
@@ -64,6 +63,7 @@ export class RealProxmox implements ProxmoxClient {
         ...(body ? { "Content-Type": "application/json" } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
+      ...(this.opts.insecure ? { tls: { rejectUnauthorized: false } } : {}),
     });
     const data = (await res.json().catch(() => ({}))) as any;
     if (!res.ok) {

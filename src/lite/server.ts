@@ -73,6 +73,8 @@ function readThresholdPct(): number {
 }
 
 if (import.meta.main) {
-  const server = startLiteServer();
-  console.log(`vmhub-lite listening on http://${server.hostname}:${server.port} (mock proxmox)`);
+  const client = createProxmoxClient();
+  const server = startLiteServer({ proxmox: client });
+  const mode = client instanceof RealProxmox ? `real proxmox (${process.env.PVE_HOST})` : "mock proxmox";
+  console.log(`vmhub-lite listening on http://${server.hostname}:${server.port} (${mode})`);
 }
