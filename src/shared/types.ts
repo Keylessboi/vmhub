@@ -246,9 +246,10 @@ export type ClickAction = { kind: "click"; x: number; y: number; button?: "left"
 export type TypeAction = { kind: "type"; text: string };
 export type KeyAction = { kind: "key"; chord: string };
 export type DragAction = { kind: "drag"; from: { x: number; y: number }; to: { x: number; y: number } };
+export type PasteAction = { kind: "paste"; text: string };
 export type GestureAction = { kind: "gesture"; type: "swipe" | "tap" | "longPress" | "pinch"; x: number; y: number; dx?: number; dy?: number };
 
-export type InputAction = ClickAction | TypeAction | KeyAction | DragAction | GestureAction;
+export type InputAction = ClickAction | TypeAction | KeyAction | DragAction | PasteAction | GestureAction;
 
 export interface WindowInfo {
   id: string;

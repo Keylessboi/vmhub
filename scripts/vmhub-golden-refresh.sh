@@ -22,10 +22,12 @@ LOG=/var/log/vmhub-golden-refresh.log
     git -C /opt/hyprland-mcp fetch --depth 1 origin main 2>&1
     git -C /opt/hyprland-mcp reset --hard origin/main 2>&1
     echo "hyprland-mcp: updated to $(git -C /opt/hyprland-mcp rev-parse --short HEAD)"
-  elif [ -d /opt/hyprland-mcp ]; then
-    # exists but not a git repo — make it one (upgrade from old golden)
+  else
+    # absent or not a git repo — clone fresh (covers first-provision and
+    # upgrades from old goldens where the source dir went missing)
     rm -rf /opt/hyprland-mcp
     git clone --depth 1 https://github.com/Keylessboi/hyprland-mcp.git /opt/hyprland-mcp 2>&1
+    echo "hyprland-mcp: cloned $(git -C /opt/hyprland-mcp rev-parse --short HEAD)"
   fi
   if [ -d /opt/hyprland-mcp ]; then
     (cd /opt/hyprland-mcp && /usr/local/bin/bun-baseline install 2>&1 || true)
