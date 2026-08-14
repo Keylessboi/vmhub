@@ -174,6 +174,10 @@ Research leads saved for the next session:
 - **Quickemu** — https://github.com/quickemu-project/quickemu — quick QEMU VM
   manager; has macOS configs ("quickget macos ..."). Wraps OSX-KVM-style
   logic with a friendlier CLI.
+- **OSX-PROXMOX** — https://github.com/luchina-gabriel/OSX-PROXMOX — macOS
+  directly on Proxmox VE (OpenCore disk images + scripts, includes Sonoma/
+  Sequoia configs). Most relevant to this stack since it targets Proxmox
+  specifically rather than generic QEMU/KVM.
 
 Open requirements to solve before building the golden:
 1. GPU: Gen8 has no macOS-supported GPU — add a Radeon (RX 580/6800) for
