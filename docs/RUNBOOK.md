@@ -123,28 +123,44 @@ Key Redfish endpoints:
 
 ## 6. POST-INSTALL checklist (the real work)
 
-1. **Run `bootstrap/post-install.sh`** on the host (as root). It is safe to
-   run now — it refuses to build a pool without a real data drive. It does:
+1. **Install a data drive into the DL360p** (the P420i bays were empty), then
+   create a RAID-0 logical volume so the OS sees the disk:
+   `ssacli ctrl slot=0 pd all show` → note the physicaldrive id (e.g.
+   `1I:0:4`), then `ssacli ctrl slot=0 create type=ld drives=1I:0:4 raid=0`.
+   The OS then shows the disk as a new `sdX`; the boot USB may flip from
+   `sda` to `sdb` — never assume device names.
+   A POST beep after installing a drive is **1785-Slot X Drive Array Not
+   Configured** — the controller warns that the drive has no logical drive
+   yet. Create the logical drive and the beep goes away on next POST.
+2. **Run `bootstrap/post-install.sh`** on the host (as root). It is safe to
+   re-run (idempotent). It does:
    - creates `vmbr1` NAT bridge (10.10.10.0/24) for test VMs
    - creates an encrypted **ZFS pool on the largest non-root, non-removable
      disk** (aes-256-gcm, dataset `vmhub/data`, keyfile
      `/etc/zfs/keys/vmhub.key`, auto-loaded at boot via systemd). The boot
      USB is never a candidate.
-   - creates the scoped `vmhub@pve` API token — it prints once; capture it
-     into Doppler as `PVE_TOKEN` + `PVE_HOST`
-2. **Install a data drive into the DL360p** (the P420i bays are empty), then
-   create a RAID-0 logical volume so the OS sees the disk:
-   `ssacli ctrl slot=0 create type=ld drives=allunconfiguredraid raid=0`
-   (adapt the drive list from `ssacli ctrl slot=0 pd all show`). Re-run
-   post-install.sh — it will find the disk and build the encrypted pool.
-3. **Deploy vmhub via Doppler**:
-   `doppler run --project proxmox --config prd -- ./deploy/install.sh`
-   (renders PVE_HOST/PVE_TOKEN into /etc/vmhub/*.env by reference)
+   - **registers the pool as PVE storage**: `pvesm add zfspool vmhub --pool
+     vmhub --content images,rootdir --sparse 1`
+   - creates the scoped `vmhub@pve` API token and applies ACLs on BOTH the
+     user and the token: `PVEVMAdmin /vms` + `PVEAuditor /storage` and
+     `/storage/vmhub`. Token-only ACLs are not enough — API tokens evaluate
+     the union of user + token permissions.
+3. **Deploy vmhub via Doppler** (on the desktop, not the host — lite binds
+   localhost there in v1):
+   `doppler run --project proxmox --config prd -- sudo -E env
+   "PATH=$HOME/.bun/bin:$PATH" REPO=$HOME/Projects/vmhub bash
+   $HOME/Projects/vmhub/deploy/install.sh`
+   - **PVE_HOST must include the port**: `192.168.1.220:8006`. The default
+     is 443 and Proxmox does not listen there.
+   - After the first deploy, `systemctl restart vmhub-lite` (start is a
+     no-op on a running unit).
 4. **Verify the full loop** (from the plan's Definition of Done):
-   `vm_list_templates → vm_lease_create → poll ready → vm_screenshot/click/
-   type → vm_put_file → vm_clone_repo → vm_get_file → vm_lease_release`
-   across hyprland + real VM adapters.
-5. **Beep**: confirm POST shows 128GB (reseat result); if beep persists, RBSU
+   - `curl http://127.0.0.1:8787/v1/templates` → `[]` (HTTP 200) proves
+     lite → RealProxmox → real server connectivity.
+   - `vm_lease_create` with a real template id → poll ready → screenshot →
+     click/type → put_file → clone_repo → get_file → release.
+5. **Beep**: a persistent beep at POST that is NOT 1785 is likely the memory
+   errors — confirm POST shows 128GB (reseat result); if it persists, RBSU
    POST Error Beep = Disabled.
 
 ## 7. vmhub architecture (30-second version)

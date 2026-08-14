@@ -116,6 +116,11 @@ else
   echo "   pool $POOL already exists"
 fi
 
+# Register the pool as PVE storage so the API can see templates/VMs on it.
+# Idempotent: pvesm add fails if already registered — ignore that.
+pvesm add zfspool "$POOL" --pool "$POOL" --content images,rootdir --sparse 1 2>/dev/null \
+  || echo "   storage $POOL already registered"
+
 echo "==> [6/7] auto-load key at boot"
 cat > /etc/systemd/system/zfs-load-vmhub-key.service <<EOF
 [Unit]
