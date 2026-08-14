@@ -81,7 +81,8 @@ Wire into opencode:
     "command": ["/home/travis/Projects/vmhub/dist/vmhub-mcp"],
     "environment": {
       "VMHUB_LITE_URL": "http://127.0.0.1:8787",
-      "VMHUB_SCREENSHOT_DIR": "/home/travis/Pictures/vmhub"
+      "VMHUB_SCREENSHOT_DIR": "/home/travis/Pictures/vmhub",
+      "CURSORTOUCH_AUTH_KEY": "set-me" // from Doppler (proxmox/prd); windows adapter auth
     },
     "timeout": 30000
   }
