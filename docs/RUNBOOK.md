@@ -255,8 +255,20 @@ cd ~/Projects/vmhub && doppler secrets --only-names --project proxmox --config p
 - Windows adapter code already committed (adapters/windows/index.ts, real CursorTouch over streamable-http)
 
 ### Repo state
-- master at 00b1a10, all pushed. Next: resume Windows subagent or finish manually.
+- master at 98f827d, all pushed. Repo is PUBLIC.
+- All four adapters are REAL (no mocks): hyprland (SSH stdio), x11 (SSH stdio +
+  computer-use-linux), windows (CursorTouch streamable-http + Bearer auth),
+  android (host-side ADB). ios/macos stay honest stubs.
+- Full test coverage added this session: 172 tests / 18 files, 0 fail.
+  Adapters (windows/x11/android/transport), mcp layer (errors/polling/
+  lite-client/capabilities/files/instructions/index), osFromTemplateName.
+- **10am resume: redeploy to pick up the new adapters** —
+  `doppler run --project proxmox --config prd -- sudo -E env
+  "PATH=$HOME/.bun/bin:$PATH" REPO=$HOME/Projects/vmhub bash
+  $HOME/Projects/vmhub/deploy/install.sh && sudo systemctl restart vmhub-lite`
+- CursorTouch key for the windows adapter: `CURSORTOUCH_AUTH_KEY` (Doppler prd).
 
 ### Notes
 - "Legal activation at this step" placeholder in docs/golden-builds.md (operator step, nothing in repo)
 - hyprland golden was accidentally destroyed then rebuilt (2070) — recipe in docs/golden-builds.md
+- Wake timer: vmhub-wake.timer fires 10:00 daily (iLO power-on), wired into deploy/install.sh
