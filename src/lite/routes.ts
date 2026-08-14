@@ -302,6 +302,14 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
     memoryMb: tpl.ramMb,
   });
   vm.vmid = pvm.vmid;
+  // A "ready" lease must be a powered-on VM, not a stopped clone.
+  try {
+    await ctx.proxmox.startVm(pvm.vmid);
+  } catch (err) {
+    // Power-on failure: tear down the clone and surface the error.
+    await ctx.proxmox.destroyVm(pvm.vmid);
+    throw err;
+  }
   ctx.db.insertVm(vm);
   try {
     ctx.db.insertLease(lease);

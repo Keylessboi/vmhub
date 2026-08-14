@@ -50,6 +50,8 @@ export interface ProxmoxClient {
   listTemplates(): Promise<Template[]>;
   /** Clone/create a VM from a template. Throws VmError on unknown/unavailable template. */
   createVm(input: CreateProxmoxVmInput): Promise<ProxmoxVm>;
+  /** Power on an existing VM. No-op when already running. */
+  startVm(vmid: number): Promise<ProxmoxVm>;
   getVm(vmid: number): Promise<ProxmoxVm>;
   /** All VMs this client knows about (reaper scans `tags` for the vmhub- prefix). */
   listVms(): Promise<ProxmoxVm[]>;
@@ -224,6 +226,13 @@ export class MockProxmox implements ProxmoxClient {
   async getVm(vmid: number): Promise<ProxmoxVm> {
     const vm = this.vms.get(vmid);
     if (!vm) throw notFound(`proxmox vm ${vmid} not found`);
+    return vm;
+  }
+
+  async startVm(vmid: number): Promise<ProxmoxVm> {
+    const vm = this.vms.get(vmid);
+    if (!vm) throw notFound(`proxmox vm ${vmid} not found`);
+    vm.status = "running";
     return vm;
   }
 

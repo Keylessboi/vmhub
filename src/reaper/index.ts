@@ -20,6 +20,7 @@
 import { rm } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { MockProxmox, type ProxmoxClient, type ProxmoxVm } from "../lite/proxmox.ts";
+import { RealProxmox } from "../lite/proxmox-real.ts";
 import type { ArtifactRecord, Lease, Vm } from "../shared/types.ts";
 import { openReaperDb, resolveReaperDbPath, type ReaperDb } from "./reaper.db.ts";
 
@@ -271,7 +272,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   }
 
   const createClient = () => {
-    // Until RealProxmox lands (Phase 3.1) the reaper runs against the mock.
+    // RealProxmox when PVE_HOST/PVE_TOKEN are present (same rule as lite);
+    // otherwise the in-memory mock (dev/test).
+    if (process.env.PVE_HOST && process.env.PVE_TOKEN) {
+      return new RealProxmox({
+        host: process.env.PVE_HOST,
+        tokenId: process.env.PVE_TOKEN_ID || "vmhub@pve!automation",
+        token: process.env.PVE_TOKEN,
+      });
+    }
     return new MockProxmox();
   };
 

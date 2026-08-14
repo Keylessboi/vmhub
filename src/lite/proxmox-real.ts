@@ -106,25 +106,22 @@ export class RealProxmox implements ProxmoxClient {
   }
 
   async listTemplates(): Promise<Template[]> {
-    // Golden templates are Proxmox VMs (config templated). We return a catalog
-    // derived from what the control plane can actually clone. For v1 the
-    // canned catalog (MockProxmox's) is authoritative for availability; this
-    // method surfaces the real VM templates as "available" when present.
-    const node = await this.node();
-    const content = (await this.request("GET", `/nodes/${node}/storage/local/content`)) as { vmid?: string }[];
-    const ids = content?.map((c) => c.vmid).filter(Boolean) ?? [];
-    // Distinct template ids from storage content (vzdump/iso/qcow2 entries
-    // carry `vmid` for VM templates). Keep it minimal: report raw vmids.
-    const unique = [...new Set(ids)];
-    return unique.map((vmid) => ({
-      id: String(vmid),
+    // Golden templates are Proxmox VMs with template=1. cluster/resources is
+    // the single authoritative view of all VMs on any storage — no hardcoded
+    // storage name, which would miss templates on non-"local" pools.
+    const vms = (await this.request("GET", `/cluster/resources?type=vm`)) as {
+      vmid: number; name?: string; template?: number; maxmem?: number; maxcpu?: number;
+    }[];
+    const templates = vms?.filter((v) => Number(v.template) === 1) ?? [];
+    return templates.map((t) => ({
+      id: String(t.vmid),
       os: "headless" as const,
       availability: "available" as const,
       capabilities: ["screenshot", "exec"] as any,
-      ramMb: 4096,
-      vcpus: 2,
+      ramMb: Math.round(Number(t.maxmem) / (1024 * 1024)) || 4096,
+      vcpus: Number(t.maxcpu) || 2,
       nestedVirt: false,
-      notes: `Real Proxmox VM template ${vmid}`,
+      notes: t.name ? `Golden template ${t.name}` : `Real Proxmox VM template ${t.vmid}`,
     }));
   }
 
@@ -144,16 +141,30 @@ export class RealProxmox implements ProxmoxClient {
       newid: vmid,
       name: input.name,
       full: 0, // linked clone — cheap, the whole architecture depends on it
-      tags: input.proxmoxTag, // identity travels with the clone
+    });
+    // The clone endpoint rejects `tags`, but the tag is the identity doctrine
+    // (reaper matches vmhub-* tags, never VMIDs). Set it right after cloning,
+    // before the VM can be observed as tag-less by any sweep.
+    await this.request("POST", `/nodes/${node}/qemu/${vmid}/config`, {
+      tags: input.proxmoxTag,
     });
     const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string };
     const tags = this.parseTags(config);
     return this.toVm({ vmid, name: input.name, status: "provisioning" }, tags);
   }
 
+  async startVm(vmid: number): Promise<ProxmoxVm> {
+    const node = await this.node();
+    const vm = await this.status(vmid);
+    if (vm !== "running") {
+      await this.request("POST", `/nodes/${node}/qemu/${vmid}/status/start`, {});
+    }
+    return this.getVm(vmid);
+  }
+
   async getVm(vmid: number): Promise<ProxmoxVm> {
     const node = await this.node();
-    const vm = (await this.request("GET", `/nodes/${node}/qemu/${vmid}`)) as any;
+    const vm = await this.statusVm(vmid);
     const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string };
     return this.toVm({ ...vm, vmid }, this.parseTags(config));
   }
@@ -171,9 +182,30 @@ export class RealProxmox implements ProxmoxClient {
     return out;
   }
 
+  /** VM power state only. GET /qemu/{vmid} is a subdir listing, not status. */
+  private async status(vmid: number): Promise<string> {
+    const node = await this.node();
+    const s = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/status/current`)) as { status?: string };
+    return s?.status ?? "unknown";
+  }
+
+  /** Full VM state from /status/current (fields: status, name, uptime, ...). */
+  private async statusVm(vmid: number): Promise<Record<string, unknown>> {
+    const node = await this.node();
+    return (await this.request("GET", `/nodes/${node}/qemu/${vmid}/status/current`)) as Record<string, unknown>;
+  }
+
   async destroyVm(vmid: number): Promise<void> {
     const node = await this.node();
     try {
+      if ((await this.status(vmid)) === "running") {
+        // Proxmox refuses to delete a running VM — stop it first, then delete.
+        await this.request("POST", `/nodes/${node}/qemu/${vmid}/status/stop`, {});
+        for (let i = 0; i < 30; i++) {
+          if ((await this.status(vmid)) !== "running") break;
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      }
       await this.request("DELETE", `/nodes/${node}/qemu/${vmid}?purge=1&destroy-unreferenced-disks=1`);
     } catch (e) {
       // Idempotent: a missing VM is a successful destroy.
@@ -184,14 +216,20 @@ export class RealProxmox implements ProxmoxClient {
 
   async diskFreeBytes(): Promise<number> {
     const node = await this.node();
-    const st = (await this.request("GET", `/nodes/${node}/storage/local/status`)) as { avail?: number };
+    const st = (await this.request("GET", `/nodes/${node}/storage/${this.storageName()}/status`)) as { avail?: number };
     return Number(st.avail ?? 0);
   }
 
   async diskUsedBytes(): Promise<number> {
     const node = await this.node();
-    const st = (await this.request("GET", `/nodes/${node}/storage/local/status`)) as { used?: number };
+    const st = (await this.request("GET", `/nodes/${node}/storage/${this.storageName()}/status`)) as { used?: number };
     return Number(st.used ?? 0);
+  }
+
+  private storageName(): string {
+    // The VM-data pool is the only storage vmhub allocates from. Resolve the
+    // storage by the pool name; the installer registers zfspool <pool>.
+    return process.env.PVE_STORAGE || "vmhub";
   }
 }
 
