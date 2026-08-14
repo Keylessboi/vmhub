@@ -342,6 +342,58 @@ describe('lease lifecycle tools', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Additional tool coverage (FakeLite + StubAdapter — no HTTP, no host)
+// ---------------------------------------------------------------------------
+
+describe('vm_health', () => {
+  it('reports ok when lite is reachable', async () => {
+    const lite = new FakeLite('x11');
+    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
+    const res = await client.callTool({ name: 'vm_health', arguments: {} });
+    const sc = res.structuredContent as { ok?: boolean; result?: { status?: string; lite?: { reachable?: boolean } } };
+    expect(sc.ok).toBe(true);
+    expect(sc.result?.status).toBe('ok');
+    expect(sc.result?.lite?.reachable).toBe(true);
+  });
+});
+
+describe('tools on the stub surface (never hidden, typed when unsupported)', () => {
+  it('vm_type is served by the stub adapter', async () => {
+    const stub = new StubAdapter();
+    const lite = new FakeLite('stub');
+    const { client } = await connectServer({ registry: new Registry({ stub: stub as never }), lite });
+    const res = await client.callTool({ name: 'vm_type', arguments: { vm_id: 'vm-0001', text: 'hello' } });
+    const sc = res.structuredContent as { ok?: boolean };
+    expect(sc.ok).toBe(true);
+    expect(stub.lastInput).toMatchObject({ kind: 'type', text: 'hello' });
+  });
+
+  it('unsupported tools return typed CAPABILITY_UNAVAILABLE (never absent)', async () => {
+    const stub = new StubAdapter();
+    const lite = new FakeLite('stub');
+    const { client } = await connectServer({ registry: new Registry({ stub: stub as never }), lite });
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['vm_inspect', { vm_id: 'vm-0001' }],
+      ['vm_list_windows', { vm_id: 'vm-0001' }],
+      ['vm_key', { vm_id: 'vm-0001', chord: 'ctrl+alt+t' }],
+      ['vm_drag', { vm_id: 'vm-0001', from_x: 1, from_y: 2, to_x: 3, to_y: 4 }],
+      ['vm_launch', { vm_id: 'vm-0001', command: 'xterm' }],
+      ['vm_focus', { vm_id: 'vm-0001', window: 'w1' }],
+      ['vm_close', { vm_id: 'vm-0001', window: 'w1' }],
+      ['vm_dispatch', { vm_id: 'vm-0001', verb: 'closewindow', args: { window: 'w1' } }],
+      ['vm_put_file', { vm_id: 'vm-0001', local_path: '/tmp/x', remote_path: '/tmp/x' }],
+      ['vm_get_file', { vm_id: 'vm-0001', remote_path: '/tmp/x', local_path: '/tmp/y' }],
+      ['vm_clone_repo', { vm_id: 'vm-0001', repo_url: 'https://github.com/a/b.git', dest_path: '/tmp/r' }],
+    ];
+    for (const [tool, args] of cases) {
+      const res = await client.callTool({ name: tool, arguments: args });
+      const sc = res.structuredContent as { error?: { code?: string } };
+      expect(sc.error?.code).toBe('CAPABILITY_UNAVAILABLE');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Fake PNG sanity
 // ---------------------------------------------------------------------------
 
