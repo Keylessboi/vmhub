@@ -259,13 +259,14 @@ cd ~/Projects/vmhub && doppler secrets --only-names --project proxmox --config p
 - All four adapters are REAL (no mocks): hyprland (SSH stdio), x11 (SSH stdio +
   computer-use-linux), windows (CursorTouch streamable-http + Bearer auth),
   android (host-side ADB). ios/macos stay honest stubs.
-- Full test coverage added this session: 172 tests / 18 files, 0 fail.
-  Adapters (windows/x11/android/transport), mcp layer (errors/polling/
-  lite-client/capabilities/files/instructions/index), osFromTemplateName.
-- **10am resume: redeploy to pick up the new adapters** —
-  `doppler run --project proxmox --config prd -- sudo -E env
-  "PATH=$HOME/.bun/bin:$PATH" REPO=$HOME/Projects/vmhub bash
-  $HOME/Projects/vmhub/deploy/install.sh && sudo systemctl restart vmhub-lite`
+- Full test coverage added this session: 194 tests / 19 files, 0 fail.
+  Adapters (windows/x11/android/hyprland/transport), mcp layer (errors/polling/
+  lite-client/capabilities/files/instructions/index/server incl. lease
+  lifecycle), osFromTemplateName.
+- **Already redeployed at 03:53** with the new adapters (binaries rebuilt,
+  lite restarted on fresh build). The 10am resume does NOT need a redeploy —
+  just verify: `strings /usr/local/bin/vmhub-mcp | grep -c AndroidAdapter`
+  (expect 7) and `systemctl is-active vmhub-lite`.
 - CursorTouch key for the windows adapter: `CURSORTOUCH_AUTH_KEY` (Doppler prd).
 
 ### Notes
