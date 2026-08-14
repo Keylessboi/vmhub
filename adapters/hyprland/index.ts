@@ -326,7 +326,7 @@ function extractImage(content: unknown[]): Promise<{ data: Buffer; mime: string 
 }
 
 /** Map hyprland-mcp McpError codes onto the shared VmError contract. */
-function mapHyprlandError(e: { code?: string; message?: string; hint?: string; recoverable?: boolean } | undefined, tool: string): VmError {
+export function mapHyprlandError(e: { code?: string; message?: string; hint?: string; recoverable?: boolean } | undefined, tool: string): VmError {
   const code = e?.code ?? 'UNKNOWN';
   const message = e?.message ?? `hyprland tool "${tool}" failed`;
   switch (code) {
