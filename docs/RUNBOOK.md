@@ -237,3 +237,26 @@ node ~/Projects/vmhub/scripts/iso-server.mjs ~/Projects/vmhub/bootstrap 8010 &
 # doppler secrets by name
 cd ~/Projects/vmhub && doppler secrets --only-names --project proxmox --config prd
 ```
+
+## SESSION HANDOFF — 2026-08-14, resume 10:00
+
+### Infrastructure (all live on 192.168.1.220)
+- Templates: 2030 debian-13-golden, 2060 x11-2404, 2070 hyprland-2404 (born-current), 2200 android-9-golden
+- All Linux goldens open to users via vmhub-mcp (11 templates in vm_list_templates)
+- Networking verified: vmbr1 NAT 10.10.10.0/24, dnsmasq DHCP, static IP pool 10.10.10.50+ from lite, MASQUERADE, ip_forward=1
+- Secrets: Doppler proxmox/prd (PVE_HOST, PVE_TOKEN, PVE_ROOT_PW, PASSWORD, ILO_USERNAME). Repo is PUBLIC — never commit secrets.
+- gh auth setup-git done (push works). Push auth needed re-setup after making repo public.
+
+### Windows golden — IN PROGRESS (the main next task)
+- VM 2100 win11-builder: Windows 11 Enterprise Evaluation INSTALLED, account vmhub/vmhub-admin-2026!, security answers "idk"
+- Subagent (bg_cbd1fc7d) was finalizing: virtio drivers, net0 firewall off (done), CursorTouch v0.8.5 on 0.0.0.0:8000, MCP handshake
+- Subagent was authorized to run activation when it sees fit (continuation queued)
+- TODO: finish finalize → activation → template as windows-11-24h2 → wire windows adapter e2e test
+- Windows adapter code already committed (adapters/windows/index.ts, real CursorTouch over streamable-http)
+
+### Repo state
+- master at 00b1a10, all pushed. Next: resume Windows subagent or finish manually.
+
+### Notes
+- "Legal activation at this step" placeholder in docs/golden-builds.md (operator step, nothing in repo)
+- hyprland golden was accidentally destroyed then rebuilt (2070) — recipe in docs/golden-builds.md
