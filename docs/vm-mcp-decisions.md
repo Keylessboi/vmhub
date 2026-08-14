@@ -49,10 +49,15 @@ re-litigate them.
 - Use the existing compiled hyprland-mcp binary in the golden, reached over
   the VM's SSH transport (stdio). No change to the pick.
 
-## Security-lab network requirements (2026-08-13, LO)
+## Network requirements (2026-08-13, LO) — general-purpose platform, one mode
 
-VMs are also used to test apps, sites, and malware. The network model must
-support isolation and controlled spread, not just NAT internet access.
+VMs serve many purposes: app testing, site testing, malware analysis, and
+malware-capability testing (where spread across a given network is the point).
+Malware is ONE mode, not the main one. The platform must be general-purpose
+with network control as an available dial, and it must have a LEARNING CURVE:
+basic app testing first, then network awareness, then isolation, then
+controlled spread. Each layer builds on the last; nothing advanced is forced
+on a simple use.
 
 ### Requirements
 1. **WiFi option per VM.** Agents must be able to create a VM with WiFi
@@ -85,6 +90,7 @@ support isolation and controlled spread, not just NAT internet access.
   base transport works.
 - The reaper must tear down the whole segment (bridge + dnsmasq + any AP)
   when the lease dies, by the same identity tag doctrine.
-- Default for ALL new templates: isolated-by-default thinking. The current
-  vmbr1 NAT is fine for benign test VMs; malware scenarios get explicit
-  isolated segments.
+- Learning-curve principle: `nat` is the default for every template (benign
+  app/site testing works with zero network knowledge). `isolated` and `wifi`
+  are explicit opt-in capabilities an agent requests when it needs them.
+  Nothing about the simple path changes when advanced modes exist.
