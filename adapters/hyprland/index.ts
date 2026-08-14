@@ -42,6 +42,20 @@ export function hyprlandMcpBin(env: NodeJS.ProcessEnv = process.env): string {
   return env.HYPRLAND_MCP_BIN ?? DEFAULT_HYPRLAND_MCP_BIN;
 }
 
+/** In-VM launcher path installed at golden build (runs bun-baseline + session env). */
+export const IN_VM_LAUNCHER = '/usr/local/bin/launch-hypr-mcp';
+
+/** SSH user for VM transport (root by default; cloud-init injects the key). */
+export function vmSshUser(env: NodeJS.ProcessEnv = process.env): string {
+  return env.VMHUB_SSH_USER ?? 'root';
+}
+
+/** ProxyJump target through the Proxmox host: "root@192.168.1.220" by default. */
+export function sshJumpTarget(env: NodeJS.ProcessEnv = process.env): string {
+  const host = env.VMHUB_JUMP_HOST ?? '192.168.1.220';
+  return `${vmSshUser(env)}@${host}`;
+}
+
 /**
  * Capability → hyprland-mcp tool mapping. Every vm_* operation delegates to
  * exactly the tool named here. Capabilities absent from this table are not
@@ -80,7 +94,7 @@ export class HyprlandAdapter implements DesktopAdapter {
     notes: 'Host Hyprland desktop via the compiled hyprland-mcp binary.',
   };
 
-  private conn: HyprlandConnection | null = null;
+  private conns = new Map<string, HyprlandConnection>();
 
   availableTools(): CapabilityId[] {
     return [
@@ -99,9 +113,51 @@ export class HyprlandAdapter implements DesktopAdapter {
     ];
   }
 
-  private async ensureConnection(): Promise<HyprlandConnection> {
-    if (this.conn) return this.conn;
+  /** Per-VM Hyprland MCP connection. Keyed by uuid; the host desktop is "local". */
+  private async ensureConnection(vm: Vm): Promise<HyprlandConnection> {
+    const key = vm.ip ? vm.uuid : "local";
+    const existing = this.conns.get(key);
+    if (existing) return existing;
 
+    const transport = this.buildTransport(vm);
+    const client = new Client({ name: 'vmhub-mcp-hyprland', version: '0.1.0' });
+    try {
+      await client.connect(transport);
+    } catch (e) {
+      throw vmError(
+        'INTERNAL',
+        `hyprland adapter: failed to connect (${e instanceof Error ? e.message : String(e)})`,
+        vm.ip
+          ? `Could not reach Hyprland in VM at ${vm.ip}. Ensure the VM is running and the desktop session is up.`
+          : 'Hyprland must be running for hyprland-template VMs. Retry when the desktop session is up.',
+      );
+    }
+    const conn = { client, transport };
+    this.conns.set(key, conn);
+    return conn;
+  }
+
+  /**
+   * VM-aware transport:
+   *  - vm.ip set → SSH through the Proxmox host into the VM, running the
+   *    in-VM launcher (/usr/local/bin/launch-hypr-mcp). The host key + VM
+   *    key are installed at golden build; -T keeps stdio clean for MCP.
+   *  - no ip (host desktop) → spawn the local compiled binary, as before.
+   */
+  private buildTransport(vm: Vm): StdioClientTransport {
+    if (vm.ip) {
+      const jump = sshJumpTarget(); // "root@192.168.1.220" by default
+      return new StdioClientTransport({
+        command: 'ssh',
+        args: [
+          '-T',
+          '-o', 'StrictHostKeyChecking=no',
+          '-o', `ProxyJump=${jump}`,
+          `${vmSshUser()}@${vm.ip}`,
+          IN_VM_LAUNCHER,
+        ],
+      });
+    }
     const bin = hyprlandMcpBin();
     if (!existsSync(bin)) {
       throw vmError(
@@ -110,24 +166,11 @@ export class HyprlandAdapter implements DesktopAdapter {
         `Set HYPRLAND_MCP_BIN or build hyprland-mcp (bun run build in /home/travis/Projects/hyprland-mcp).`,
       );
     }
-
-    const transport = new StdioClientTransport({ command: bin });
-    const client = new Client({ name: 'vmhub-mcp-hyprland', version: '0.1.0' });
-    try {
-      await client.connect(transport);
-    } catch (e) {
-      throw vmError(
-        'INTERNAL',
-        `hyprland adapter: failed to connect to hyprland-mcp (${e instanceof Error ? e.message : String(e)})`,
-        'Hyprland must be running for hyprland-template VMs. Retry when the desktop session is up.',
-      );
-    }
-    this.conn = { client, transport };
-    return this.conn;
+    return new StdioClientTransport({ command: bin });
   }
 
-  async screenshot(_vm: Vm): Promise<ScreenshotResult> {
-    const res = await this.call('screenshot', { target: 'screen', jpeg: false });
+  async screenshot(vm: Vm): Promise<ScreenshotResult> {
+    const res = await this.call(vm, 'screenshot', { target: 'screen', jpeg: false });
     const result = res.result as {
       geometry?: { x: number; y: number; w: number; h: number };
       empty?: boolean;
@@ -135,31 +178,35 @@ export class HyprlandAdapter implements DesktopAdapter {
     if (result.empty) throw vmError('INTERNAL', 'hyprland screenshot produced no bytes');
 
     const image = await extractImage(res.content);
-    const geometry = result.geometry ?? { x: 0, y: 0, w: 0, h: 0 };
-    // Logical coords map to pixels: pixel = (logical - region.origin) * scale.
-    // grim captures physical pixels; the desktop scale is 1 unless configured.
+    // hyprland-mcp puts geometry in the text payload, not structuredContent.
+    const text = res.content.find((c): c is { type: string; text?: string } => typeof c === 'object' && c !== null && (c as { type: string }).type === 'text')?.text;
+    let geometry = result.geometry;
+    if (!geometry && text) {
+      try { geometry = JSON.parse(text).geometry; } catch { /* keep fallback */ }
+    }
+    const g = geometry ?? { x: 0, y: 0, w: 0, h: 0 };
     return {
       image: image.data,
       format: image.mime === 'image/jpeg' ? 'jpg' : 'png',
-      width: geometry.w,
-      height: geometry.h,
-      coordMapping: { scaleX: 1, scaleY: 1, offsetX: geometry.x, offsetY: geometry.y },
+      width: g.w,
+      height: g.h,
+      coordMapping: { scaleX: 1, scaleY: 1, offsetX: g.x, offsetY: g.y },
     };
   }
 
-  async input(_vm: Vm, action: InputAction): Promise<void> {
+  async input(vm: Vm, action: InputAction): Promise<void> {
     switch (action.kind) {
       case 'click':
-        await this.call('input_click', { x: action.x, y: action.y, button: action.button ?? 'left' });
+        await this.call(vm, 'input_click', { x: action.x, y: action.y, button: action.button ?? 'left' });
         return;
       case 'type':
-        await this.call('input_type', { text: action.text });
+        await this.call(vm, 'input_type', { text: action.text });
         return;
       case 'key':
-        await this.call('input_key', { chord: action.chord });
+        await this.call(vm, 'input_key', { chord: action.chord });
         return;
       case 'drag':
-        await this.call('input_drag', {
+        await this.call(vm, 'input_drag', {
           start_x: action.from.x,
           start_y: action.from.y,
           end_x: action.to.x,
@@ -171,8 +218,8 @@ export class HyprlandAdapter implements DesktopAdapter {
     }
   }
 
-  async listWindows(_vm: Vm, filter?: string): Promise<WindowInfo[]> {
-    const res = await this.call('get_state', {});
+  async listWindows(vm: Vm, filter?: string): Promise<WindowInfo[]> {
+    const res = await this.call(vm, 'get_state', {});
     const state = res.result as unknown as {
       windows?: Array<{
         address: string;
@@ -201,8 +248,8 @@ export class HyprlandAdapter implements DesktopAdapter {
       }));
   }
 
-  async inspect(_vm: Vm): Promise<SemanticElement> {
-    const res = await this.call('read_text_on_screen', { target: 'screen' });
+  async inspect(vm: Vm): Promise<SemanticElement> {
+    const res = await this.call(vm, 'read_text_on_screen', { target: 'screen' });
     const result = res.result as {
       region: { x: number; y: number; w: number; h: number };
       words?: Array<{
@@ -242,7 +289,7 @@ export class HyprlandAdapter implements DesktopAdapter {
    * tools; anything else forwards to hyprctl dispatch as argv — never shell
    * strings (hyprland-mcp validates args server-side too).
    */
-  async dispatch(_vm: Vm, verb: string, args: Record<string, unknown>): Promise<unknown> {
+  async dispatch(vm: Vm, verb: string, args: Record<string, unknown>): Promise<unknown> {
     switch (verb) {
       case 'launch': {
         const launchArgs: Record<string, unknown> = {
@@ -252,26 +299,26 @@ export class HyprlandAdapter implements DesktopAdapter {
           timeout_ms: args.timeout_ms ?? 10_000,
         };
         if (args.workspace !== undefined) launchArgs.workspace = args.workspace;
-        return (await this.call('launch', launchArgs)).result;
+        return (await this.call(vm, 'launch', launchArgs)).result;
       }
       case 'focus':
-        return (await this.call('focus', { window: String(args.window) })).result;
+        return (await this.call(vm, 'focus', { window: String(args.window) })).result;
       case 'close':
-        return (await this.call('close', { window: String(args.window) })).result;
+        return (await this.call(vm, 'close', { window: String(args.window) })).result;
       case 'paste':
         // hyprland-mcp input_paste: wl-copy + Ctrl+V, gated by its config.
-        return (await this.call('input_paste', { text: String(args.text) })).result;
+        return (await this.call(vm, 'input_paste', { text: String(args.text) })).result;
       default: {
         // Raw hyprctl dispatch. Keys + values flatten to argv (validated, typed).
         const argv = [verb, ...Object.entries(args).flatMap(([k, v]) => [k, String(v)])];
-        return (await this.call('dispatch', { args: argv })).result;
+        return (await this.call(vm, 'dispatch', { args: argv })).result;
       }
     }
   }
 
   /** Call a hyprland tool and normalize every failure to a typed VmError. */
-  private async call(name: string, args: Record<string, unknown>): Promise<{ result: Record<string, unknown>; content: unknown[] }> {
-    const conn = await this.ensureConnection();
+  private async call(vm: Vm, name: string, args: Record<string, unknown>): Promise<{ result: Record<string, unknown>; content: unknown[] }> {
+    const conn = await this.ensureConnection(vm);
     const res = await conn.client.callTool({ name, arguments: args });
     const sc = res.structuredContent as
       | { ok?: boolean; error?: { code?: string; message?: string; hint?: string; recoverable?: boolean }; result?: Record<string, unknown> }

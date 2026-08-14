@@ -41,6 +41,22 @@ function vmError(code: VmError["code"], message: string, retryable: boolean, hin
   return { code, message, retryable, hint, detail };
 }
 
+/**
+ * Map a golden template's display name to its adapter OS family. Golden names
+ * follow the catalog convention: "<os>-<version>" (hyprland-2404, x11-...,
+ * windows-11-24h2, android-...). Unknown names fall back to "headless".
+ */
+function osFromTemplateName(name: string | undefined): Template["os"] {
+  const n = (name ?? "").toLowerCase();
+  if (n.startsWith("hyprland")) return "hyprland";
+  if (n.startsWith("windows") || n.startsWith("win")) return "windows";
+  if (n.startsWith("android")) return "android";
+  if (n.startsWith("x11") || n.startsWith("ubuntu-x11")) return "x11";
+  if (n.startsWith("macos") || n.startsWith("mac")) return "macos";
+  if (n.startsWith("ios")) return "ios";
+  return "headless";
+}
+
 export class RealProxmox implements ProxmoxClient {
   private readonly opts: Required<Pick<RealProxmoxOptions, "host" | "tokenId" | "token" | "basePath" | "insecure">> & { node?: string };
   private readonly vmSubnetMask: string;
@@ -146,7 +162,7 @@ export class RealProxmox implements ProxmoxClient {
     const templates = vms?.filter((v) => Number(v.template) === 1) ?? [];
     return templates.map((t) => ({
       id: String(t.vmid),
-      os: "headless" as const,
+      os: osFromTemplateName(t.name),
       availability: "available" as const,
       capabilities: ["screenshot", "exec"] as any,
       ramMb: Math.round(Number(t.maxmem) / (1024 * 1024)) || 4096,
