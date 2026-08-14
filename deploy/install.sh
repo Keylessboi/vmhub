@@ -61,6 +61,8 @@ echo "==> install systemd units"
 install -m 0644 "$REPO/deploy/systemd/vmhub-lite.service"     "$UNITDIR/"
 install -m 0644 "$REPO/deploy/systemd/vmhub-reaper.service"   "$UNITDIR/"
 install -m 0644 "$REPO/deploy/systemd/vmhub-reaper.timer"     "$UNITDIR/"
+install -m 0644 "$REPO/deploy/systemd/vmhub-wake.service"     "$UNITDIR/"
+install -m 0644 "$REPO/deploy/systemd/vmhub-wake.timer"       "$UNITDIR/"
 
 echo "==> enable + start (survives reboot)"
 systemctl daemon-reload
@@ -69,6 +71,7 @@ systemctl enable vmhub-reaper.timer
 systemctl start vmhub-lite.service
 systemctl start vmhub-reaper.timer
 systemctl restart vmhub-reaper.service   # one sweep now, proves the loop
+systemctl enable vmhub-wake.timer        # 10am host wake via iLO (desktop is always on)
 
 echo "==> verify"
 systemctl --no-pager status vmhub-lite.service --lines=3 | tail -5
