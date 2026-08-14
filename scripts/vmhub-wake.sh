@@ -5,7 +5,8 @@ set -euo pipefail
 
 ILO="https://192.168.1.216"
 USER="ops"
-PW="${PASSWORD:-}"   # from ~/.env or the environment
+PW="${PASSWORD:-}"
+if [ -z "$PW" ] && [ -f "$HOME/.env" ]; then set -a; . "$HOME/.env"; set +a; PW="${PASSWORD:-}"; fi
 
 # Is the host already up? Nothing to do.
 if timeout 3 bash -c "echo > /dev/tcp/192.168.1.220/8006" 2>/dev/null; then
