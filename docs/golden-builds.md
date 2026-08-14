@@ -172,3 +172,13 @@ Template: VMID **2200**, `qm template` converted disks to
 - The Android "wifi" toggle shows no network (expected — no framework
   network; the static `lan0` serves raw IP connectivity for ADB).
 - No guest agent (Android has none; `agent enabled=0`).
+
+## windows-11-24h2 (VMID 2100 → golden) — build steps
+
+1. Install Win11 Enterprise Evaluation (manual, UEFI/OVMF, proper partition layout).
+2. Local account: vmhub / vmhub-admin-2026! / security answers "idk".
+3. **ACTIVATE WINDOWS AT THIS STEP** — operator action, not documented here.
+4. Install virtio drivers (virtio-win ISO), disable net0 firewall.
+5. Install CursorTouch v0.8.5 (uv tool install windows-mcp==0.8.5),
+   streamable-http on 0.0.0.0:8000 with auth key.
+6. Convert to golden template.
