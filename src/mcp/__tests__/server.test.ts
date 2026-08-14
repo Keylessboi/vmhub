@@ -8,6 +8,7 @@ import type { Client as ClientType } from '@modelcontextprotocol/client';
 import { buildMcpServer } from '../index.ts';
 import { Registry } from '../../../adapters/index.ts';
 import { fakePng } from '../../../adapters/_mock.ts';
+import { x11Adapter } from '../../../adapters/x11/index.ts';
 import { vmError } from '../errors.ts';
 import { VM_TOOLS } from '../capabilities.ts';
 import type { DesktopAdapter, InputAction, SemanticElement, Vm, WindowInfo } from '../../shared/types.ts';
@@ -282,6 +283,61 @@ describe('template catalog', () => {
     const res = await client.callTool({ name: 'vm_capabilities', arguments: { id: 'hyprland' } });
     const sc = res.structuredContent as { result?: { availableTools?: string[] } };
     expect(sc.result?.availableTools).toContain(CAPABILITIES.dispatch);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lease lifecycle (FakeLite-backed — no HTTP, no host)
+// ---------------------------------------------------------------------------
+
+describe('lease lifecycle tools', () => {
+  it('vm_lease_create forwards template_id/owner/request_id to lite', async () => {
+    const lite = new FakeLite('x11');
+    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
+    const res = await client.callTool({
+      name: 'vm_lease_create',
+      arguments: { template_id: 'x11', owner: 'me', request_id: 'req-1' },
+    });
+    const sc = res.structuredContent as { ok?: boolean; result?: { vm?: { uuid?: string } } };
+    expect(sc.ok).toBe(true);
+    expect(sc.result?.vm?.uuid).toBe('vm-0001');
+    expect(lite.createLeaseCalls).toContainEqual({ templateId: 'x11', requestId: 'req-1' });
+  });
+
+  it('vm_lease_status resolves the leased VM', async () => {
+    const lite = new FakeLite('x11');
+    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
+    await client.callTool({ name: 'vm_lease_create', arguments: { template_id: 'x11', owner: 'me', request_id: 'req-1' } });
+    const res = await client.callTool({ name: 'vm_lease_status', arguments: { lease_id: 'vm-0001' } });
+    const sc = res.structuredContent as { ok?: boolean };
+    expect(sc.ok).toBe(true);
+  });
+
+  it('vm_lease_renew increments renewCount', async () => {
+    const lite = new FakeLite('x11');
+    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
+    await client.callTool({ name: 'vm_lease_create', arguments: { template_id: 'x11', owner: 'me', request_id: 'req-1' } });
+    await client.callTool({ name: 'vm_lease_renew', arguments: { lease_id: 'vm-0001' } });
+    expect(lite.leases.get('vm-0001')?.lease.renewCount).toBe(1);
+  });
+
+  it('vm_lease_release removes the lease', async () => {
+    const lite = new FakeLite('x11');
+    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
+    await client.callTool({ name: 'vm_lease_create', arguments: { template_id: 'x11', owner: 'me', request_id: 'req-1' } });
+    const res = await client.callTool({ name: 'vm_lease_release', arguments: { lease_id: 'vm-0001' } });
+    const sc = res.structuredContent as { ok?: boolean };
+    expect(sc.ok).toBe(true);
+    expect(lite.leases.has('vm-0001')).toBe(false);
+  });
+
+  it('vm_lease_status on an unknown lease → typed NOT_FOUND', async () => {
+    const lite = new FakeLite('x11');
+    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
+    const res = await client.callTool({ name: 'vm_lease_status', arguments: { lease_id: 'ghost' } });
+    expect(res.isError).toBe(true);
+    const sc = res.structuredContent as { error?: { code?: string } };
+    expect(sc.error?.code).toBe('NOT_FOUND');
   });
 });
 
