@@ -5,7 +5,7 @@ can resume the vmhub build with zero loss. It captures every hard-won fact,
 every secret location (by name, never value), and the exact commands to
 continue. Read it top to bottom before touching anything.
 
-Last updated: 2026-08-15 (issue #3: x11 golden repaired and gate-verified)
+Last updated: 2026-08-15 (issues #8/#9/#10: x11 golden 64G rebuild + template alias resolution)
 
 ---
 
@@ -323,3 +323,48 @@ doppler run --project proxmox --config prd -- sudo ./control-plane/deploy.sh
   (x11 is no longer "still to build")
 - 2602 x11-2404-repaired: spare / rollback template, stopped
 - 2030 debian-13-golden, 2070 hyprland-2404, 2100 windows-11-24h2: untouched
+
+## SESSION HANDOFF: issues #8/#9/#10 (x11 golden 64G + template alias resolution)
+
+### Issue bundle (root causes)
+
+- **Issue #8 (ffmpeg premise conflation).** The issue assumed the golden needs
+  ffmpeg because the Keylessboi/computer-use fork captures via
+  `ffmpeg -f x11grab`. The vmhub adapter path (computer-use-linux 0.4.9)
+  captures through gnome-screenshot and does NOT need ffmpeg (gate-verified
+  5/5 without it). The golden ships `ffmpeg` + `xvfb` anyway so both paths
+  work on a leased clone. Full note in docs/golden-builds.md (x11 required
+  packages).
+- **Issue #9 (root disk too small).** The golden inherited the base's ~3G root
+  disk and ran 99% full; the requirement is a root disk of ≥ 64GB. The rebuild
+  recipe (full clone to a `builder`-tagged VMID, `qm resize <vmid> scsi0 64G`,
+  `growpart /dev/sda 1 && resize2fs /dev/sda1`, `df -h /` ≈63G, gate 5/5,
+  re-template to 2060) is in docs/golden-builds.md.
+- **Issue #10 (template alias resolution).** `vm_lease_create` currently
+  resolves only numeric VMIDs. It must accept BOTH adapter names (e.g. `x11`)
+  and VMIDs (e.g. `2060`) via a `resolveTemplate` port. The code fix is a
+  separate parallel task against the vmhub repo; these docs describe the
+  intended final state and stay accurate once that fix lands.
+
+### Deploy (after the fix lands)
+
+Bump `control-plane/vmhub.pin` in the infra repo, push, then deploy from the
+infra repo:
+
+```bash
+doppler run --project proxmox --config prd -- sudo ./control-plane/deploy.sh
+```
+
+Verify the deployed binary carries the new symbol:
+
+```bash
+strings /usr/local/bin/vmhub-mcp | grep -c resolveTemplate   # expect >= 1
+```
+
+### Post-deploy smoke
+
+1. `vm_lease_create('x11')` and `vm_lease_create('2060')` both succeed (the
+   adapter name and the VMID alias resolve to the same 2060 template).
+2. Fresh lease: run `scripts/x11-golden-gate.sh <lease-ip>` from the host,
+   expect 5/5 `OVERALL: PASS`.
+3. On the leased VM: `apt-get install -y ffmpeg` succeeds.
