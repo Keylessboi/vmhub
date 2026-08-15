@@ -33,6 +33,12 @@ export interface ReadinessOpts {
    *  hang) or the gate would burn its whole bound on one attempt and
    *  report 'error' on a perfectly healthy VM. Default 10000. */
   attemptTimeoutMs?: number;
+  /** Sleep between failed probes, ms. Without backoff a cold clone's
+   *  connection-refused probes (each fails in ~200ms) burn all retries in
+   *  seconds — before sshd (~23s) or openbox (~27s) ever appear — and the
+   *  gate reports 'error' on a perfectly healthy VM. Default 2000ms gives
+   *  30 retries × ~2.2s ≈ 66s of coverage, past a full cold boot. */
+  probeDelayMs?: number;
   /** Hard bound for the whole gate. Default 120000ms (a cold clone's desktop
    *  takes ~25-30s to appear after power-on — SSH +23s, openbox +27s — so the
    *  gate must outlast a full boot, not just a warm desktop). */
@@ -41,6 +47,7 @@ export interface ReadinessOpts {
 
 const DEFAULT_RETRIES = 30;
 const DEFAULT_ATTEMPT_TIMEOUT_MS = 10_000;
+const DEFAULT_PROBE_DELAY_MS = 2_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 /** callback shape promisify(execFile) exposes: (err, {stdout, stderr}). */
@@ -89,6 +96,7 @@ export function checkDesktopReady(vm: Vm, opts: ReadinessOpts = {}): Promise<boo
   const execFileLike = (opts.execFile ?? defaultExecFile) as ExecFileLike;
   const retries = opts.retries ?? DEFAULT_RETRIES;
   const attemptTimeoutMs = opts.attemptTimeoutMs ?? DEFAULT_ATTEMPT_TIMEOUT_MS;
+  const probeDelayMs = opts.probeDelayMs ?? DEFAULT_PROBE_DELAY_MS;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const args = [...sshIntoVmArgs(vm), 'pgrep', '-x', 'openbox'];
 
@@ -118,7 +126,9 @@ export function checkDesktopReady(vm: Vm, opts: ReadinessOpts = {}): Promise<boo
           finish(false);
           return;
         }
-        tryProbe();
+        // Backoff: a cold clone refuses ssh for ~23s — retry without pause
+        // would burn every retry in seconds and fail before the desktop.
+        setTimeout(tryProbe, probeDelayMs);
       });
     };
     tryProbe();

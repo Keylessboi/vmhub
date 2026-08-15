@@ -37,6 +37,7 @@ interface ReadinessOpts {
   execFile?: unknown;
   retries?: number;
   attemptTimeoutMs?: number;
+  probeDelayMs?: number;
   timeoutMs?: number;
 }
 
@@ -54,7 +55,7 @@ describe('checkDesktopReady (readiness gate)', () => {
     const execFile = vi.fn((_f: string, _a: string[], _o: unknown, cb: (err: Error | null, out: { stdout: string; stderr: string }) => void) => {
       cb(null, { stdout: '', stderr: '' });
     });
-    const ready = await checkDesktopReady(vm, { execFile: execFile as unknown as ExecFileLike, retries: 3, timeoutMs: 500 });
+    const ready = await checkDesktopReady(vm, { execFile: execFile as unknown as ExecFileLike, retries: 3, probeDelayMs: 0, timeoutMs: 500 });
     expect(ready).toBe(true);
     const call = execFile.mock.calls[0];
     expect(call?.[0]).toBe('ssh');
@@ -66,7 +67,7 @@ describe('checkDesktopReady (readiness gate)', () => {
     const execFile = vi.fn((_f: string, _a: string[], _o: unknown, cb: (err: Error | null, out: { stdout: string; stderr: string }) => void) => {
       cb(Object.assign(new Error('pgrep: no process found'), { code: 1 }), { stdout: '', stderr: '' });
     });
-    const ready = await checkDesktopReady(vm, { execFile: execFile as unknown as ExecFileLike, retries: 3, timeoutMs: 500 });
+    const ready = await checkDesktopReady(vm, { execFile: execFile as unknown as ExecFileLike, retries: 3, probeDelayMs: 0, timeoutMs: 500 });
     expect(ready).toBe(false);
     expect(execFile.mock.calls.length).toBeGreaterThan(1);
   });
@@ -74,7 +75,7 @@ describe('checkDesktopReady (readiness gate)', () => {
   it('honors the injectable timeout when the probe never returns', async () => {
     const { checkDesktopReady } = await loadReadiness();
     const execFile = vi.fn(() => {});
-    const ready = await checkDesktopReady(vm, { execFile: execFile as unknown as ExecFileLike, retries: 3, timeoutMs: 50 });
+    const ready = await checkDesktopReady(vm, { execFile: execFile as unknown as ExecFileLike, retries: 3, probeDelayMs: 0, timeoutMs: 50 });
     expect(ready).toBe(false);
   });
 
@@ -96,7 +97,7 @@ describe('checkDesktopReady (readiness gate)', () => {
         }
       },
     );
-    const ready = await checkDesktopReady(vm, { execFile: execFile as unknown as ExecFileLike, retries: 5, attemptTimeoutMs: 30, timeoutMs: 500 });
+    const ready = await checkDesktopReady(vm, { execFile: execFile as unknown as ExecFileLike, retries: 5, attemptTimeoutMs: 30, probeDelayMs: 0, timeoutMs: 500 });
     expect(ready).toBe(true);
     expect(execFile.mock.calls.length).toBe(2);
     // each attempt carries the per-attempt timeout, not the full bound
@@ -104,5 +105,34 @@ describe('checkDesktopReady (readiness gate)', () => {
       expect((opts as { timeout: number }).timeout).toBe(30);
     }
     for (const t of timers) clearTimeout(t);
+  });
+
+  it('backs off between failed probes — a cold clone cannot burn every retry in seconds', async () => {
+    // Regression for the deployed smoke: with no inter-probe delay, a clone's
+    // connection-refused ssh probes (~200ms each) exhausted 30 retries in ~5s
+    // and the gate reported 'error' before sshd/openbox (~27s) were up.
+    const { checkDesktopReady } = await loadReadiness();
+    vi.useFakeTimers();
+    try {
+      const execFile = vi.fn((_f: string, _a: string[], _o: unknown, cb: (err: Error | null, out: { stdout: string; stderr: string }) => void) => {
+        cb(Object.assign(new Error('connection refused'), { code: 255 }), { stdout: '', stderr: '' });
+      });
+      const pending = checkDesktopReady(vm, { execFile: execFile as unknown as ExecFileLike, retries: 3, probeDelayMs: 100, timeoutMs: 5_000 });
+      await Promise.resolve();
+      expect(execFile.mock.calls.length).toBe(1);
+      vi.advanceTimersByTime(99);
+      await Promise.resolve();
+      expect(execFile.mock.calls.length).toBe(1);
+      vi.advanceTimersByTime(1);
+      await Promise.resolve();
+      expect(execFile.mock.calls.length).toBe(2);
+      vi.advanceTimersByTime(100);
+      await Promise.resolve();
+      const ready = await pending;
+      expect(ready).toBe(false);
+      expect(execFile.mock.calls.length).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
