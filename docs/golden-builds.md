@@ -11,7 +11,7 @@ Built from the Debian 13 genericcloud image imported into the encrypted
 - cloud-init root + authorized_keys injected (SSH transport)
 - `vga: virtio` for a real DRM device (serial-only VGA breaks desktops)
 
-## hyprland-2404 (VMID 2050) — Hyprland desktop golden
+## hyprland-2404 (VMID 2070) — Hyprland desktop golden
 
 Built from debian-13-golden. Critical learnings (all cost real time):
 
@@ -54,7 +54,7 @@ Desktop → `ssh -T -o ProxyJump=root@192.168.1.220 root@<vm-ip>
 - windows-11-24h2: /tmp/win11.iso (5.1G) — CursorTouch v0.8.5 in-VM
 - x11 golden: computer-use-linux in-VM MCP
 
-## android-9-golden (VMID 2200) — Android-x86 9.0-r2 desktop golden
+## android (bliss-android16, VMID 2110) — Android-x86 9.0-r2 desktop golden
 
 Built 2026-08-14 from android-x86_64-9.0-r2. Boots to a usable Android 9
 desktop (setup wizard disabled) with ADB-over-network verified from the
@@ -158,8 +158,13 @@ $ adb devices
 10.10.10.100:5555   device
 ```
 
-Template: VMID **2200**, `qm template` converted disks to
-`vmhub:base-2200-disk-0` (16G) + `vmhub:base-2200-disk-2` (EFI vars).
+### Current live state (2026-08-14, verified against Proxmox)
+
+The built VM exists as **bliss-android16 (VMID 2110)** but is still a plain VM —
+it was NOT converted to a golden template (`qm template` never ran), so it is
+not clonable and the MCP catalog marks `android` as unavailable. To finish:
+stop the VM, `qm template 2110` (converts disks to `vmhub:base-2110-disk-*`),
+then the live catalog will advertise it and `android` becomes provisionable.
 
 ### What a clone needs
 - **A unique IP.** Either write it to `/data/local/network.conf`
@@ -174,6 +179,10 @@ Template: VMID **2200**, `qm template` converted disks to
 - No guest agent (Android has none; `agent enabled=0`).
 
 ## windows-11-24h2 (VMID 2100 → golden) — build steps
+
+Status: **in progress**. The build VM exists as `win11-builder` (VMID 2100,
+running, not yet a golden template). The MCP catalog therefore marks `windows`
+as unavailable until `qm template 2100` runs.
 
 1. **Create the VM** (hardware matters):
    - machine `q35`, BIOS `OVMF (UEFI)`, EFI disk with pre-enrolled keys

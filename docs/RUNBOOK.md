@@ -241,8 +241,9 @@ cd ~/Projects/vmhub && doppler secrets --only-names --project proxmox --config p
 ## SESSION HANDOFF — 2026-08-14, resume 10:00
 
 ### Infrastructure (all live on 192.168.1.220)
-- Templates: 2030 debian-13-golden, 2060 x11-2404, 2070 hyprland-2404 (born-current), 2200 android-9-golden
-- All Linux goldens open to users via vmhub-mcp (11 templates in vm_list_templates)
+- Templates: 2030 debian-13-golden, 2060 x11-2404, 2070 hyprland-2404 (born-current)
+- Running VMs (NOT templates — not clonable yet): 2100 win11-builder, 2110 bliss-android16
+- Linux goldens open to users via vmhub-mcp (vm_list_templates shows the real VMIDs; 2030/2060/2070 available, windows/android/macos/ios unavailable until their goldens exist)
 - Networking verified: vmbr1 NAT 10.10.10.0/24, dnsmasq DHCP, static IP pool 10.10.10.50+ from lite, MASQUERADE, ip_forward=1
 - Secrets: Doppler proxmox/prd (PVE_HOST, PVE_TOKEN, PVE_ROOT_PW, PASSWORD, ILO_USERNAME). Repo is PUBLIC — never commit secrets.
 - gh auth setup-git done (push works). Push auth needed re-setup after making repo public.

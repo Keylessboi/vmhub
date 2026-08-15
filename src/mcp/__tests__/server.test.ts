@@ -63,7 +63,8 @@ class FakeLite implements LiteClient {
   artifacts: ArtifactRecord[] = [];
   createLeaseCalls: Array<{ templateId: string; requestId: string }> = [];
 
-  constructor(vmAdapter: string) {
+  constructor(vmAdapter: string, templates?: Template[]) {
+    this.templates = templates ?? [];
     const vm: Vm = {
       uuid: 'vm-0001',
       templateId: vmAdapter,
@@ -229,57 +230,132 @@ describe('capability gating', () => {
 // Template catalog (pre-create capability query)
 // ---------------------------------------------------------------------------
 
-describe('template catalog', () => {
-  async function setupFull() {
-    const { client } = await connectServer({ lite: new FakeLite('hyprland') });
+/** Production-like real catalog: ids are the actual Proxmox VMIDs. */
+function realCatalog(): Template[] {
+  return [
+    {
+      id: '2030',
+      os: 'headless',
+      availability: 'available',
+      capabilities: [CAPABILITIES.exec],
+      ramMb: 4096,
+      vcpus: 2,
+      nestedVirt: false,
+      notes: 'Golden template debian-13-golden',
+    },
+    {
+      id: '2060',
+      os: 'x11',
+      availability: 'available',
+      capabilities: [
+        CAPABILITIES.screenshot,
+        CAPABILITIES.inspect,
+        CAPABILITIES.listWindows,
+        CAPABILITIES.click,
+        CAPABILITIES.type,
+        CAPABILITIES.key,
+        CAPABILITIES.drag,
+        CAPABILITIES.exec,
+      ],
+      ramMb: 4096,
+      vcpus: 2,
+      nestedVirt: false,
+      notes: 'Golden template x11-2404',
+    },
+    {
+      id: '2070',
+      os: 'hyprland',
+      availability: 'available',
+      capabilities: [
+        CAPABILITIES.screenshot,
+        CAPABILITIES.inspect,
+        CAPABILITIES.listWindows,
+        CAPABILITIES.click,
+        CAPABILITIES.type,
+        CAPABILITIES.key,
+        CAPABILITIES.drag,
+        CAPABILITIES.dispatch,
+        CAPABILITIES.exec,
+      ],
+      ramMb: 4096,
+      vcpus: 2,
+      nestedVirt: false,
+      notes: 'Golden template hyprland-2404',
+    },
+  ];
+}
+
+describe('template catalog (real Proxmox VMIDs are the ids)', () => {
+  async function setupReal() {
+    const { client } = await connectServer({ lite: new FakeLite('hyprland', realCatalog()) });
     return { client };
   }
 
-  it('lists all 7 adapters with honest availability and reasons', async () => {
-    const { client } = await setupFull();
+  it('available templates are the real Proxmox VMIDs, not adapter aliases', async () => {
+    const { client } = await setupReal();
     const res = await client.callTool({ name: 'vm_list_templates', arguments: {} });
     const sc = res.structuredContent as { result?: { templates?: Template[] } };
     const templates = sc.result?.templates ?? [];
-    const ids = templates.map((t) => t.id).sort();
-    expect(ids).toEqual(['android', 'headless', 'hyprland', 'ios', 'macos', 'windows', 'x11']);
+    const available = templates.filter((t) => t.availability === 'available');
+    expect(available.map((t) => t.id).sort()).toEqual(['2030', '2060', '2070']);
 
-    const hyprland = templates.find((t) => t.id === 'hyprland');
+    const hyprland = templates.find((t) => t.id === '2070');
     expect(hyprland?.availability).toBe('available');
-    expect(hyprland?.capabilities.length).toBeGreaterThan(8);
+    expect(hyprland?.capabilities).toContain(CAPABILITIES.dispatch);
 
-    const x11 = templates.find((t) => t.id === 'x11');
+    const x11 = templates.find((t) => t.id === '2060');
     expect(x11?.availability).toBe('available');
     expect(x11?.capabilities).toContain(CAPABILITIES.screenshot);
     expect(x11?.capabilities).toContain(CAPABILITIES.click);
     expect(x11?.capabilities).not.toContain(CAPABILITIES.launch);
 
-    const headless = templates.find((t) => t.id === 'headless');
+    const headless = templates.find((t) => t.id === '2030');
     expect(headless?.availability).toBe('available');
-    expect(headless?.capabilities).toEqual([]);
+    expect(headless?.capabilities).toEqual([CAPABILITIES.exec]);
+  });
 
-    const ios = templates.find((t) => t.id === 'ios');
-    expect(ios?.availability).toBe('stub');
-    expect(ios?.capabilities).toEqual([]);
-    expect(ios?.reason).toBeTruthy();
+  it('adapter ids with a live golden are replaced (no duplicate entries)', async () => {
+    const { client } = await setupReal();
+    const res = await client.callTool({ name: 'vm_list_templates', arguments: {} });
+    const sc = res.structuredContent as { result?: { templates?: Template[] } };
+    const ids = (sc.result?.templates ?? []).map((t) => t.id);
+    expect(ids).not.toContain('hyprland');
+    expect(ids).not.toContain('x11');
+    expect(ids).not.toContain('headless');
+  });
 
-    const windows = templates.find((t) => t.id === 'windows');
-    expect(windows?.availability).toBe('available');
-    expect(windows?.capabilities).toContain(CAPABILITIES.screenshot);
-    expect(windows?.capabilities).toContain(CAPABILITIES.click);
-    // File transfer is not on the real CursorTouch surface (no sftp tool).
-    expect(windows?.capabilities).not.toContain(CAPABILITIES.putFile);
+  it('adapters with no live golden are unavailable with a reason (never hidden)', async () => {
+    const { client } = await setupReal();
+    const res = await client.callTool({ name: 'vm_list_templates', arguments: {} });
+    const sc = res.structuredContent as { result?: { templates?: Template[] } };
+    const templates = sc.result?.templates ?? [];
+    for (const id of ['windows', 'android', 'macos', 'ios']) {
+      const t = templates.find((x) => x.id === id);
+      expect(t).toBeDefined();
+      expect(t?.availability).not.toBe('available');
+      expect(t?.reason).toBeTruthy();
+    }
   });
 
   it('unknown template id → typed NOT_FOUND', async () => {
-    const { client } = await setupFull();
+    const { client } = await setupReal();
     const res = await client.callTool({ name: 'vm_capabilities', arguments: { id: 'nope' } });
     const sc = res.structuredContent as { error?: { code?: string } };
     expect(res.isError).toBe(true);
     expect(sc.error?.code).toBe('NOT_FOUND');
   });
 
-  it('hyprland template lists the dispatch capability (validated escape hatch)', async () => {
-    const { client } = await setupFull();
+  it('vm_capabilities accepts a real Proxmox VMID', async () => {
+    const { client } = await setupReal();
+    const res = await client.callTool({ name: 'vm_capabilities', arguments: { id: '2070' } });
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as { result?: { template?: Template; availableTools?: string[] } };
+    expect(sc.result?.template?.id).toBe('2070');
+    expect(sc.result?.availableTools).toContain(CAPABILITIES.screenshot);
+  });
+
+  it('hyprland adapter id still answers vm_capabilities (registry path)', async () => {
+    const { client } = await setupReal();
     const res = await client.callTool({ name: 'vm_capabilities', arguments: { id: 'hyprland' } });
     const sc = res.structuredContent as { result?: { availableTools?: string[] } };
     expect(sc.result?.availableTools).toContain(CAPABILITIES.dispatch);
@@ -291,8 +367,8 @@ describe('template catalog', () => {
 // ---------------------------------------------------------------------------
 
 describe('lease lifecycle tools', () => {
-  it('vm_lease_create forwards template_id/owner/request_id to lite', async () => {
-    const lite = new FakeLite('x11');
+  it('vm_lease_create resolves an adapter alias and forwards the real VMID to lite', async () => {
+    const lite = new FakeLite('x11', realCatalog());
     const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
     const res = await client.callTool({
       name: 'vm_lease_create',
@@ -301,11 +377,48 @@ describe('lease lifecycle tools', () => {
     const sc = res.structuredContent as { ok?: boolean; result?: { vm?: { uuid?: string } } };
     expect(sc.ok).toBe(true);
     expect(sc.result?.vm?.uuid).toBe('vm-0001');
-    expect(lite.createLeaseCalls).toContainEqual({ templateId: 'x11', requestId: 'req-1' });
+    expect(lite.createLeaseCalls).toContainEqual({ templateId: '2060', requestId: 'req-1' });
+  });
+
+  it('vm_lease_create accepts a real Proxmox VMID as template_id', async () => {
+    const lite = new FakeLite('x11', realCatalog());
+    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
+    const res = await client.callTool({
+      name: 'vm_lease_create',
+      arguments: { template_id: '2060', owner: 'me', request_id: 'req-2' },
+    });
+    const sc = res.structuredContent as { ok?: boolean };
+    expect(sc.ok).toBe(true);
+    expect(lite.createLeaseCalls).toContainEqual({ templateId: '2060', requestId: 'req-2' });
+  });
+
+  it('vm_lease_create refuses a template with no live golden (typed CAPABILITY_UNAVAILABLE)', async () => {
+    const lite = new FakeLite('x11', realCatalog());
+    const { client } = await connectServer({ lite });
+    const res = await client.callTool({
+      name: 'vm_lease_create',
+      arguments: { template_id: 'windows', owner: 'me', request_id: 'req-3' },
+    });
+    expect(res.isError).toBe(true);
+    const sc = res.structuredContent as { error?: { code?: string; message?: string } };
+    expect(sc.error?.code).toBe('CAPABILITY_UNAVAILABLE');
+    expect(sc.error?.message).toContain('windows');
+  });
+
+  it('vm_lease_create with an unknown template id → typed NOT_FOUND', async () => {
+    const lite = new FakeLite('x11', realCatalog());
+    const { client } = await connectServer({ lite });
+    const res = await client.callTool({
+      name: 'vm_lease_create',
+      arguments: { template_id: '9999', owner: 'me', request_id: 'req-4' },
+    });
+    expect(res.isError).toBe(true);
+    const sc = res.structuredContent as { error?: { code?: string } };
+    expect(sc.error?.code).toBe('NOT_FOUND');
   });
 
   it('vm_lease_status resolves the leased VM', async () => {
-    const lite = new FakeLite('x11');
+    const lite = new FakeLite('x11', realCatalog());
     const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
     await client.callTool({ name: 'vm_lease_create', arguments: { template_id: 'x11', owner: 'me', request_id: 'req-1' } });
     const res = await client.callTool({ name: 'vm_lease_status', arguments: { lease_id: 'vm-0001' } });
@@ -314,7 +427,7 @@ describe('lease lifecycle tools', () => {
   });
 
   it('vm_lease_renew increments renewCount', async () => {
-    const lite = new FakeLite('x11');
+    const lite = new FakeLite('x11', realCatalog());
     const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
     await client.callTool({ name: 'vm_lease_create', arguments: { template_id: 'x11', owner: 'me', request_id: 'req-1' } });
     await client.callTool({ name: 'vm_lease_renew', arguments: { lease_id: 'vm-0001' } });
@@ -322,7 +435,7 @@ describe('lease lifecycle tools', () => {
   });
 
   it('vm_lease_release removes the lease', async () => {
-    const lite = new FakeLite('x11');
+    const lite = new FakeLite('x11', realCatalog());
     const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
     await client.callTool({ name: 'vm_lease_create', arguments: { template_id: 'x11', owner: 'me', request_id: 'req-1' } });
     const res = await client.callTool({ name: 'vm_lease_release', arguments: { lease_id: 'vm-0001' } });
@@ -332,7 +445,7 @@ describe('lease lifecycle tools', () => {
   });
 
   it('vm_lease_status on an unknown lease → typed NOT_FOUND', async () => {
-    const lite = new FakeLite('x11');
+    const lite = new FakeLite('x11', realCatalog());
     const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
     const res = await client.callTool({ name: 'vm_lease_status', arguments: { lease_id: 'ghost' } });
     expect(res.isError).toBe(true);

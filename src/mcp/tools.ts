@@ -8,7 +8,7 @@ import { z } from 'zod';
 import type { DesktopAdapter, Template, Vm } from '../shared/types.ts';
 import type { AdapterRegistry } from '../../adapters/index.ts';
 import type { LiteClient } from './lite-client.ts';
-import { assertToolAvailable, capabilityReport, getTemplate, templateCatalog, type VmToolName } from './capabilities.ts';
+import { assertToolAvailable, capabilityReport, getTemplate, templateCatalog, templateFromAdapter, type VmToolName } from './capabilities.ts';
 import { errorResult, okResult, toVmError, vmError } from './errors.ts';
 import { pollUntil, POLL_BOUND_MS } from './polling.ts';
 import { writeScreenshot } from './files.ts';
@@ -18,6 +18,63 @@ export interface McpDeps {
   registry: AdapterRegistry;
   /** Base URL reported by vm_health (not the request target — deps.lite is). */
   liteUrl: string;
+}
+
+// ---------------------------------------------------------------------------
+// Real-catalog template resolution (the VMID namespace contract)
+//
+// lite's REAL template catalog is the single source of truth for template ids:
+// in production those ids ARE the live Proxmox VMIDs (2030, 2060, 2070 ...).
+// A local adapter id still resolves as an alias when a live golden exists for
+// that OS family (backward compatible), and adapters with no live golden
+// resolve to an `unavailable` entry so vm_lease_create NEVER forwards an id
+// lite cannot clone. When lite is unreachable the local matrix is used
+// degraded — never an error.
+// ---------------------------------------------------------------------------
+
+async function resolveTemplate(deps: McpDeps, templateId: string): Promise<Template> {
+  let real: Template[] | undefined;
+  try {
+    real = await deps.lite.getTemplates();
+  } catch {
+    real = undefined; // lite unreachable → degraded local matrix
+  }
+
+  // Exact real id (a Proxmox VMID) — the authoritative path.
+  const exact = real?.find((t) => t.id === templateId);
+  if (exact) return exact;
+
+  // Local adapter id — alias to its live golden, or an honest unavailable.
+  if (deps.registry.has(templateId)) {
+    const local = templateFromAdapter(deps.registry.get(templateId));
+    const realForOs = real?.find((t) => t.os === local.os);
+    if (realForOs) return realForOs;
+    if (real === undefined) return local; // degraded (lite unreachable)
+    return {
+      ...local,
+      availability: 'unavailable',
+      reason: noGoldenReason(local.id, real),
+    };
+  }
+
+  const known =
+    real !== undefined
+      ? [...deps.registry.ids(), ...real.map((t) => t.id)].join(', ')
+      : deps.registry.ids().join(', ');
+  throw vmError('NOT_FOUND', `unknown template "${templateId}"`, `known templates: ${known}`);
+}
+
+function noGoldenReason(adapterId: string, real: Template[]): string {
+  const ids = real.map((t) => t.id).join(', ');
+  return `no live golden template on Proxmox for "${adapterId}" — provisionable template ids: ${ids || 'none'}`;
+}
+
+function sortCatalog(templates: Template[]): Template[] {
+  return [...templates].sort((a, b) => {
+    const aReady = a.availability === 'available' ? 0 : 1;
+    const bReady = b.availability === 'available' ? 0 : 1;
+    return aReady !== bReady ? aReady - bReady : a.id.localeCompare(b.id);
+  });
 }
 
 /** Resolve a VM's adapter and enforce capability gating before any call. */
@@ -57,22 +114,34 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
     async () => {
       const start = Date.now();
       try {
-        // Merge the local adapter matrix with lite's REAL template catalog
-        // (which mirrors the goldens on the Proxmox host). Real templates win
-        // for their id; adapters with no live golden still appear as stubs so
-        // nothing is hidden.
+        // lite's REAL catalog is the source of truth: template ids ARE the
+        // live Proxmox VMIDs. Local adapters with a live golden are replaced
+        // by their real entry; adapters with no golden are demoted to
+        // `unavailable` so the catalog never advertises an id lite cannot
+        // clone.
         const local = templateCatalog(deps.registry);
         let real: Template[] = [];
         try {
           real = await deps.lite.getTemplates();
         } catch {
-          real = []; // lite unreachable → degrade to the local matrix, not an error
+          real = []; // lite unreachable → degrade to the local matrix
         }
-        const realById = new Map(real.map((t) => [t.id, t]));
-        const merged = local.map((t) => realById.get(t.id) ?? t);
-        const localIds = new Set(local.map((t) => t.id));
-        const liteOnly = real.filter((r) => !localIds.has(r.id));
-        return okResult('vm_list_templates', { templates: [...merged, ...liteOnly] }, start);
+        const realByOs = new Map(real.map((t) => [t.os, t]));
+        const merged = local.map((t) => {
+          const realForOs = realByOs.get(t.os);
+          if (realForOs) return realForOs;
+          return {
+            ...t,
+            availability: 'unavailable' as const,
+            reason:
+              real.length === 0
+                ? 'vmhub-lite reports no golden templates — nothing can be provisioned right now'
+                : noGoldenReason(t.id, real),
+          };
+        });
+        const mergedIds = new Set(merged.map((t) => t.id));
+        const liteOnly = real.filter((r) => !mergedIds.has(r.id));
+        return okResult('vm_list_templates', { templates: sortCatalog([...merged, ...liteOnly]) }, start);
       } catch (e) {
         return errorResult('vm_list_templates', toVmError(e, 'vm_list_templates'), start);
       }
@@ -91,12 +160,27 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
     async ({ id }) => {
       const start = Date.now();
       try {
-        if (!deps.registry.has(id)) {
-          throw vmError('NOT_FOUND', `unknown template "${id}"`, `known templates: ${deps.registry.ids().join(', ')}`);
+        if (deps.registry.has(id)) {
+          const adapter = deps.registry.get(id);
+          const report = capabilityReport(adapter);
+          return okResult('vm_capabilities', { ...report, template: getTemplate(deps.registry, id) }, start);
         }
-        const adapter = deps.registry.get(id);
-        const report = capabilityReport(adapter);
-        return okResult('vm_capabilities', { ...report, template: getTemplate(deps.registry, id) }, start);
+        // Real Proxmox VMID path: resolve from lite's live catalog and map to
+        // the adapter by OS family.
+        const real = await deps.lite.getTemplates();
+        const t = real.find((r) => r.id === id);
+        if (!t) {
+          throw vmError(
+            'NOT_FOUND',
+            `unknown template "${id}"`,
+            `known templates: ${[...deps.registry.ids(), ...real.map((r) => r.id)].join(', ')}`,
+          );
+        }
+        const adapter = deps.registry.has(t.os) ? deps.registry.get(t.os) : undefined;
+        const report = adapter
+          ? capabilityReport(adapter)
+          : { adapter: id, os: t.os, capability: null, availableTools: t.capabilities };
+        return okResult('vm_capabilities', { ...report, template: t }, start);
       } catch (e) {
         return errorResult('vm_capabilities', toVmError(e, 'vm_capabilities'), start);
       }
@@ -161,11 +245,16 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
     async ({ template_id, owner, request_id, ttl_ms }) => {
       const start = Date.now();
       try {
-        const template = getTemplate(deps.registry, template_id);
-        if (template.availability === 'unavailable') {
-          throw vmError('CAPABILITY_UNAVAILABLE', `template "${template_id}" is unavailable: ${template.reason}`);
+        const template = await resolveTemplate(deps, template_id);
+        if (template.availability !== 'available') {
+          throw vmError(
+            'CAPABILITY_UNAVAILABLE',
+            `template "${template_id}" is not available: ${template.reason ?? 'no live golden template'}`,
+          );
         }
-        const created = await deps.lite.createLease({ templateId: template_id, owner, requestId: request_id, ttlMs: ttl_ms });
+        // Forward the RESOLVED id (a real Proxmox VMID when one exists), never
+        // a local adapter alias lite cannot clone.
+        const created = await deps.lite.createLease({ templateId: template.id, owner, requestId: request_id, ttlMs: ttl_ms });
         const outcome = await pollUntil(
           () => deps.lite.getLease(created.lease.vmId),
           (s) => DONE_STATUSES.has(s.vm.status),
