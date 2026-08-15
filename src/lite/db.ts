@@ -134,8 +134,15 @@ export class LiteDb {
     return rowToVm(row);
   }
 
-  getVmByVmid(vmid: number): VmRow | null {
-    const row = this.db.prepare(`SELECT ${VMS_COLUMNS} FROM vms WHERE vmid = ?`).get(vmid);
+  /**
+   * VMID is node-local (the vms table enforces UNIQUE(nodeId, vmid)), so a
+   * VMID alone never identifies a VM — nodeId + vmid do. The old bare-vmid
+   * lookup was removed; multi-node callers must scope by node.
+   */
+  getVmByNodeVmid(nodeId: string, vmid: number): VmRow | null {
+    const row = this.db
+      .prepare(`SELECT ${VMS_COLUMNS} FROM vms WHERE nodeId = ? AND vmid = ?`)
+      .get(nodeId, vmid);
     return rowToVm(row);
   }
 
@@ -148,6 +155,7 @@ export class LiteDb {
     this.db.prepare("UPDATE vms SET status = ? WHERE uuid = ?").run(status, uuid);
   }
 
+  /** Hard delete — removes the row outright; there is no soft-delete flag. */
   deleteVm(uuid: string): void {
     this.db.prepare("DELETE FROM vms WHERE uuid = ?").run(uuid);
   }

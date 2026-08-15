@@ -51,12 +51,13 @@ async function insertFixture(
 ): Promise<void> {
   conn
     .prepare(
-      `INSERT INTO vms (uuid, vmid, templateId, adapter, capabilities, proxmoxTag, namePrefix, status, sshPort, scratchDir, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO vms (uuid, vmid, nodeId, templateId, adapter, capabilities, proxmoxTag, namePrefix, status, sshPort, scratchDir, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       vm.uuid,
       vm.sshPort ?? 1000,
+      vm.nodeId,
       vm.templateId,
       vm.adapter,
       JSON.stringify(vm.capabilities),
@@ -121,6 +122,16 @@ describe("reaper.db", () => {
     expect(all[0]?.lease.expiresAt).toBe(10_000);
   });
 
+  it("join carries nodeId into each lease's VM", async () => {
+    await insertFixture(conn, { ...makeVm("u-1", 1000), nodeId: "node-b" }, makeLease("u-1"));
+    await insertFixture(conn, { ...makeVm("u-2", 1001), nodeId: "dl360p" }, makeLease("u-2"));
+    db = await openReaperDb(dbPath);
+
+    const byUuid = new Map(db.listLeasesWithVm().map((l) => [l.vm.uuid, l.vm]));
+    expect(byUuid.get("u-1")?.nodeId).toBe("node-b");
+    expect(byUuid.get("u-2")?.nodeId).toBe("dl360p");
+  });
+
   it("skips released leases — only active leases are reaped", async () => {
     await insertFixture(conn, makeVm("u-active", 1000), makeLease("u-active"), "active");
     await insertFixture(conn, makeVm("u-released", 1001), makeLease("u-released"), "released");
@@ -130,8 +141,7 @@ describe("reaper.db", () => {
     expect(all.map((l) => l.vm.uuid)).toEqual(["u-active"]);
   });
 
-  it("joins artifacts into each lease", async () => {
-    await insertFixture(
+  it("joins artifacts into each lease", async () => {    await insertFixture(
       conn,
       makeVm("u-1", 1000),
       makeLease("u-1"),

@@ -1,15 +1,19 @@
 /**
  * LiteDb persistence tests (bun:sqlite). Run with `bun test src/lite`.
  */
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { LiteDb } from "./db.ts";
+import { DEFAULT_NODE_ID } from "../shared/schema.ts";
+import { LiteDb, loadDbDriver } from "./db.ts";
 import type { LeaseRow, VmRow } from "./db.ts";
 
-function vmRow(uuid: string, vmid = 1000): VmRow {
+function vmRow(uuid: string, vmid = 1000, nodeId = DEFAULT_NODE_ID): VmRow {
   return {
     uuid,
     vmid,
-    nodeId: 'dl360p',
+    nodeId,
     templateId: "hyprland-2404",
     adapter: "hyprland",
     capabilities: ["screenshot", "click"],
@@ -19,6 +23,23 @@ function vmRow(uuid: string, vmid = 1000): VmRow {
     createdAt: 1_000_000,
   };
 }
+
+/** vms DDL as it existed before multi-node support: vmid UNIQUE, no nodeId. */
+const LEGACY_VMS_DDL = `
+CREATE TABLE IF NOT EXISTS vms (
+  uuid         TEXT PRIMARY KEY,
+  vmid         INTEGER NOT NULL UNIQUE,
+  templateId   TEXT NOT NULL,
+  adapter      TEXT NOT NULL,
+  capabilities TEXT NOT NULL,
+  proxmoxTag   TEXT NOT NULL,
+  namePrefix   TEXT NOT NULL,
+  status       TEXT NOT NULL,
+  sshPort      INTEGER,
+  ip           TEXT,
+  scratchDir   TEXT,
+  createdAt    INTEGER NOT NULL
+);`;
 
 function leaseRow(vmId: string, requestId: string): LeaseRow {
   return {
@@ -41,7 +62,8 @@ describe("LiteDb vms", () => {
     db.insertVm(vm);
     const got = db.getVm("u1");
     expect(got).toEqual(vm);
-    expect(db.getVmByVmid(1000)?.uuid).toBe("u1");
+    expect(db.getVmByNodeVmid("dl360p", 1000)?.uuid).toBe("u1");
+    expect(db.getVmByNodeVmid("other-node", 1000)).toBeNull();
     expect(db.listVms()).toHaveLength(1);
     db.updateVmStatus("u1", "draining");
     expect(db.getVm("u1")?.status).toBe("draining");
@@ -58,6 +80,61 @@ describe("LiteDb vms", () => {
     expect(got?.sshPort).toBeUndefined();
     expect(got?.scratchDir).toBeUndefined();
     db.close();
+  });
+});
+
+describe("LiteDb multi-node vms", () => {
+  test("same vmid on different nodes coexists; same node + vmid throws UNIQUE", () => {
+    const db = new LiteDb(":memory:");
+    db.insertVm(vmRow("u-nodeA", 1000, "nodeA"));
+    db.insertVm(vmRow("u-nodeB", 1000, "nodeB"));
+    expect(db.listVms()).toHaveLength(2);
+
+    expect(db.getVmByNodeVmid("nodeA", 1000)?.uuid).toBe("u-nodeA");
+    expect(db.getVmByNodeVmid("nodeB", 1000)?.uuid).toBe("u-nodeB");
+
+    expect(() => db.insertVm(vmRow("u-nodeA-dup", 1000, "nodeA"))).toThrow(/UNIQUE/);
+    expect(db.listVms()).toHaveLength(2);
+    db.close();
+  });
+
+  test("getVmByNodeVmid scopes by node — wrong node or unknown vmid is null", () => {
+    const db = new LiteDb(":memory:");
+    db.insertVm(vmRow("u1", 1000, "nodeA"));
+    expect(db.getVmByNodeVmid("nodeA", 1000)?.uuid).toBe("u1");
+    expect(db.getVmByNodeVmid("nodeB", 1000)).toBeNull();
+    expect(db.getVmByNodeVmid("nodeA", 999)).toBeNull();
+    db.close();
+  });
+});
+
+describe("LiteDb legacy backfill", () => {
+  test("old-format DB (no nodeId column) opens: rows backfill to dl360p, new rows insert", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "vmhub-legacy-db-"));
+    const dbPath = join(dir, "leases.sqlite");
+    const Ctor = await loadDbDriver();
+    try {
+      const legacy = new Ctor(dbPath);
+      legacy.exec(LEGACY_VMS_DDL);
+      legacy
+        .prepare(
+          `INSERT INTO vms (uuid, vmid, templateId, adapter, capabilities, proxmoxTag, namePrefix, status, sshPort, scratchDir, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run("legacy-u1", 1000, "hyprland-2404", "hyprland", '["screenshot"]', "vmhub-hl-legacy-u1", "hl", "ready", null, null, 1_000_000);
+      legacy.close();
+
+      const db = new LiteDb(dbPath);
+      const legacyVm = db.getVm("legacy-u1");
+      expect(legacyVm?.vmid).toBe(1000);
+      expect(legacyVm?.nodeId).toBe(DEFAULT_NODE_ID);
+
+      db.insertVm(vmRow("u2", 1001));
+      expect(db.getVm("u2")?.nodeId).toBe(DEFAULT_NODE_ID);
+      db.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
