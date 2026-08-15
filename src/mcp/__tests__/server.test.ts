@@ -251,7 +251,9 @@ describe('template catalog', () => {
     expect(x11?.availability).toBe('available');
     expect(x11?.capabilities).toContain(CAPABILITIES.screenshot);
     expect(x11?.capabilities).toContain(CAPABILITIES.click);
-    expect(x11?.capabilities).not.toContain(CAPABILITIES.launch);
+    // INTENTIONAL CHANGE for issue #3: x11 gains launch/close/exec in T4a,
+    // so the x11 template now advertises launch instead of hiding it.
+    expect(x11?.capabilities).toContain(CAPABILITIES.launch);
 
     const headless = templates.find((t) => t.id === 'headless');
     expect(headless?.availability).toBe('available');
@@ -302,6 +304,25 @@ describe('lease lifecycle tools', () => {
     expect(sc.ok).toBe(true);
     expect(sc.result?.vm?.uuid).toBe('vm-0001');
     expect(lite.createLeaseCalls).toContainEqual({ templateId: 'x11', requestId: 'req-1' });
+  });
+
+  it('vm_lease_create accepts a real Proxmox VMID template from the lite catalog (issue #3 E2E contract)', async () => {
+    // "2060" is a golden VMID on the host, NOT an adapter id — the local
+    // adapter matrix knows only x11/hyprland/... . The catalog merges real
+    // templates, so a visible template must be leasable.
+    const lite = new FakeLite('x11');
+    lite.templates = [
+      { id: '2060', os: 'x11', availability: 'available', capabilities: ['screenshot'], ramMb: 4096, vcpus: 2, nestedVirt: false },
+    ];
+    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
+    const res = await client.callTool({
+      name: 'vm_lease_create',
+      arguments: { template_id: '2060', owner: 'me', request_id: 'req-2060' },
+    });
+    const sc = res.structuredContent as { ok?: boolean; result?: { vm?: { uuid?: string } } };
+    expect(sc.ok).toBe(true);
+    expect(sc.result?.vm?.uuid).toBe('vm-0001');
+    expect(lite.createLeaseCalls).toContainEqual({ templateId: '2060', requestId: 'req-2060' });
   });
 
   it('vm_lease_status resolves the leased VM', async () => {
