@@ -11,12 +11,15 @@
  */
 import { statfsSync } from "node:fs";
 import type { Template, VmError } from "../shared/types.ts";
+import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 
 export type ProxmoxVmStatus = "running" | "stopped" | "provisioning";
 
 export interface ProxmoxVm {
-  /** Numeric VMID — internal to Proxmox; never a vmhub identity. */
+  /** Numeric VMID — internal to Proxmox; never a vmhub identity. Unique per node. */
   vmid: number;
+  /** The node this VM lives on (UNIQUE(nodeId, vmid) — vmids collide across nodes). */
+  nodeId: string;
   /** Proxmox display name (informational only). */
   name: string;
   /** Template this VM was created from. */
@@ -39,6 +42,8 @@ export interface CreateProxmoxVmInput {
   /** Informational VM name (the identity is the tag, not the name). */
   name: string;
   proxmoxTag: string;
+  /** Target node; defaults to the client's node (single-node default keeps legacy callers). */
+  nodeId?: string;
   cpus?: number;
   memoryMb?: number;
 }
@@ -195,12 +200,23 @@ export function isVmError(err: unknown): err is VmError {
 
 /**
  * In-memory MockProxmox. Created VMs are immediately "running" (instant
- * provisioning), VMIDs increment from 1000, and the identity tag is stored as
- * given. Used until the real Proxmox server exists (Phase 3.1).
+ * provisioning), VMIDs increment per node from 1000, and the identity tag is
+ * stored as given. Used until the real Proxmox server exists (Phase 3.1).
+ * One client = one node; the per-node counter map honors the shared
+ * UNIQUE(nodeId, vmid) contract when an input overrides the client's node.
  */
 export class MockProxmox implements ProxmoxClient {
-  private vms = new Map<number, ProxmoxVm>();
-  private nextVmid = 1000;
+  readonly nodeId: string;
+  private vms = new Map<string, ProxmoxVm>();
+  private nextVmid = new Map<string, number>();
+
+  constructor(nodeId: string = DEFAULT_NODE_ID) {
+    this.nodeId = nodeId;
+  }
+
+  private key(nodeId: string, vmid: number): string {
+    return `${nodeId}:${vmid}`;
+  }
 
   async listTemplates(): Promise<Template[]> {
     return CANNED_TEMPLATES.map(({ prefix: _prefix, ...tpl }) => tpl);
@@ -211,9 +227,13 @@ export class MockProxmox implements ProxmoxClient {
     if (!tpl) throw notFound(`template '${input.templateId}' not found`);
     if (tpl.availability !== "available") throw unavailable(tpl);
 
-    const vmid = this.nextVmid++;
+    const nodeId = input.nodeId ?? this.nodeId;
+    const next = this.nextVmid.get(nodeId) ?? 1000;
+    this.nextVmid.set(nodeId, next + 1);
+    const vmid = next;
     const vm: ProxmoxVm = {
       vmid,
+      nodeId,
       name: input.name,
       templateId: input.templateId,
       tags: [input.proxmoxTag],
@@ -221,18 +241,18 @@ export class MockProxmox implements ProxmoxClient {
       status: "running",
       createdAt: Date.now(),
     };
-    this.vms.set(vmid, vm);
+    this.vms.set(this.key(nodeId, vmid), vm);
     return vm;
   }
 
   async getVm(vmid: number): Promise<ProxmoxVm> {
-    const vm = this.vms.get(vmid);
+    const vm = this.vms.get(this.key(this.nodeId, vmid));
     if (!vm) throw notFound(`proxmox vm ${vmid} not found`);
     return vm;
   }
 
   async startVm(vmid: number): Promise<ProxmoxVm> {
-    const vm = this.vms.get(vmid);
+    const vm = this.vms.get(this.key(this.nodeId, vmid));
     if (!vm) throw notFound(`proxmox vm ${vmid} not found`);
     vm.status = "running";
     return vm;
@@ -243,7 +263,7 @@ export class MockProxmox implements ProxmoxClient {
   }
 
   async destroyVm(vmid: number): Promise<void> {
-    this.vms.delete(vmid);
+    this.vms.delete(this.key(this.nodeId, vmid));
   }
 
   async diskFreeBytes(): Promise<number> {
@@ -268,9 +288,9 @@ export class MockProxmox implements ProxmoxClient {
     // nothing to release for the in-memory mock
   }
 
-  /** Test helper: wipe all mock VMs and reset the VMID counter. */
+  /** Test helper: wipe all mock VMs and reset the per-node VMID counters. */
   reset(): void {
     this.vms.clear();
-    this.nextVmid = 1000;
+    this.nextVmid.clear();
   }
 }

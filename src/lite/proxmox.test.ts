@@ -4,6 +4,7 @@
 import { describe, expect, test } from "vitest";
 import { MockProxmox } from "./proxmox.ts";
 import { isVmError } from "./proxmox.ts";
+import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 
 const input = {
   templateId: "hyprland-2404",
@@ -41,6 +42,28 @@ describe("MockProxmox createVm", () => {
     expect(a.tags).toContain("vmhub-hl-uuid-1");
     expect(b.vmid).toBe(1001);
     expect(a.vmid).not.toBe(b.vmid);
+  });
+
+  test("per-node VMID counters: two nodes can both hold vmid 1000", async () => {
+    // Regression: a single shared counter made nodeB's first VM collide with
+    // nodeA's first VM on multi-node. The real Proxmox UNIQUE(nodeId, vmid)
+    // contract allows the same vmid on different nodes.
+    const nodeA = new MockProxmox("nodeA");
+    const nodeB = new MockProxmox("nodeB");
+    const a = await nodeA.createVm({ ...input, name: "a" });
+    const b = await nodeB.createVm({ ...input, name: "b" });
+    expect(a.vmid).toBe(1000);
+    expect(b.vmid).toBe(1000);
+    expect(a.nodeId).toBe("nodeA");
+    expect(b.nodeId).toBe("nodeB");
+    expect((await nodeA.listVms()).map((vm) => vm.vmid)).toEqual([1000]);
+    expect((await nodeB.listVms()).map((vm) => vm.vmid)).toEqual([1000]);
+  });
+
+  test("default nodeId is the legacy single node", async () => {
+    const px = new MockProxmox();
+    const vm = await px.createVm(input);
+    expect(vm.nodeId).toBe(DEFAULT_NODE_ID);
   });
 
   test("diskFreeBytes and diskUsedBytes report the host filesystem", async () => {

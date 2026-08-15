@@ -13,12 +13,16 @@
  * the tag; listVms filters to tagged VMs.
  */
 import type { Template, VmError } from "../shared/types.ts";
+import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 import type { CreateProxmoxVmInput, ProxmoxClient, ProxmoxVm, ProxmoxVmStatus } from "./proxmox.ts";
 
 export interface RealProxmoxOptions {
   host: string;
   tokenId: string;
   token: string;
+  /** vmhub node id — allocator key and the VM's node; also the API node when `node` is unset. */
+  nodeId?: string;
+  /** Proxmox node name for API calls; auto-discovered when both `node` and `nodeId` are unset. */
   node?: string;
   /** Base path prefix, default "/api2/json". */
   basePath?: string;
@@ -30,15 +34,76 @@ export interface RealProxmoxOptions {
   vmGateway?: string;
   /** First IP handed out to VMs (default 10.10.10.50). */
   vmIpStart?: string;
+  /** Last host octet of the static-NAT pool (inclusive). Default 199. */
+  vmIpEnd?: number;
 }
 
 const DEFAULT_TOKEN_ID = "vmhub@pve!automation";
 const VM_NETWORK = "10.10.10.0/24";
 const VM_GATEWAY = "10.10.10.1";
 const VM_IP_START = 50; // 10.10.10.50 — first pool address for leases
+const VM_IP_END = 199; // 10.10.10.199 — last pool address (150 leases per node)
 
 function vmError(code: VmError["code"], message: string, retryable: boolean, hint: VmError["hint"], detail?: string): VmError {
   return { code, message, retryable, hint, detail };
+}
+
+// ---------------------------------------------------------------------------
+// Static-NAT IP pool — registry-driven per node
+// ---------------------------------------------------------------------------
+
+export interface IpPoolConfig {
+  /** Node the pool belongs to — the allocator key. */
+  nodeId: string;
+  /** VM network CIDR, e.g. "10.10.10.0/24". */
+  subnet: string;
+  /** Gateway of the VM network. */
+  gateway: string;
+  /** First host octet handed out (inclusive). */
+  start: number;
+  /** Last host octet handed out (inclusive). */
+  end: number;
+}
+
+/**
+ * One pool per node: VMIDs are unique per node, and so are the static-NAT IPs
+ * handed out for transport. Exhaustion surfaces as HOST_CAPACITY so the
+ * control plane reports capacity rather than misrouting to another node.
+ */
+export class NodeIpPool {
+  private readonly usedIps = new Set<string>();
+
+  constructor(readonly config: IpPoolConfig) {}
+
+  /** Allocate the next free IP in this node's pool. Throws HOST_CAPACITY when exhausted. */
+  allocate(): string {
+    const { subnet, start, end } = this.config;
+    const prefix = subnet.split("/")[0]!.split(".").slice(0, 3).join(".");
+    for (let octet = start; octet <= end; octet++) {
+      const ip = `${prefix}.${octet}`;
+      if (!this.usedIps.has(ip)) {
+        this.usedIps.add(ip);
+        return ip;
+      }
+    }
+    throw vmError("HOST_CAPACITY", `vmhub IP pool exhausted for node '${this.config.nodeId}' (${prefix}.${start}-${prefix}.${end})`, false, "no-retry");
+  }
+}
+
+const NODE_IP_POOLS = new Map<string, NodeIpPool>();
+
+/**
+ * Registry lookup: one allocator per nodeId, shared by every client of that
+ * node so allocated ranges stay consistent across the control plane. The
+ * first config for a nodeId wins (config is static per node).
+ */
+export function poolForNode(config: IpPoolConfig): NodeIpPool {
+  let pool = NODE_IP_POOLS.get(config.nodeId);
+  if (!pool) {
+    pool = new NodeIpPool(config);
+    NODE_IP_POOLS.set(config.nodeId, pool);
+  }
+  return pool;
 }
 
 /**
@@ -67,12 +132,9 @@ function templateCapabilities(os: Template["os"]): Template["capabilities"] {
 }
 
 export class RealProxmox implements ProxmoxClient {
-  private readonly opts: Required<Pick<RealProxmoxOptions, "host" | "tokenId" | "token" | "basePath" | "insecure">> & { node?: string };
-  private readonly vmSubnetMask: string;
-  private readonly vmGateway: string;
-  private readonly vmIpStart: number;
+  private readonly opts: Required<Pick<RealProxmoxOptions, "host" | "tokenId" | "token" | "basePath" | "insecure">> & { node?: string; nodeId?: string };
+  private readonly pool: NodeIpPool;
   private nodePromise: Promise<string> | null = null;
-  private readonly usedIps = new Set<string>();
 
   constructor(options: RealProxmoxOptions) {
     this.opts = {
@@ -81,13 +143,18 @@ export class RealProxmox implements ProxmoxClient {
       token: options.token,
       basePath: options.basePath || "/api2/json",
       insecure: options.insecure ?? true,
-      node: options.node,
+      node: options.node ?? options.nodeId,
+      nodeId: options.nodeId,
     };
-    const cidr = options.vmSubnet ?? VM_NETWORK;
-    this.vmSubnetMask = cidr.split("/")[1] ?? "24";
-    this.vmGateway = options.vmGateway ?? VM_GATEWAY;
+    const subnet = options.vmSubnet ?? VM_NETWORK;
     const start = options.vmIpStart ? Number(options.vmIpStart.split(".").pop()) : VM_IP_START;
-    this.vmIpStart = Number.isFinite(start) ? start : VM_IP_START;
+    this.pool = poolForNode({
+      nodeId: options.nodeId ?? DEFAULT_NODE_ID,
+      subnet,
+      gateway: options.vmGateway ?? VM_GATEWAY,
+      start: Number.isFinite(start) ? start : VM_IP_START,
+      end: options.vmIpEnd ?? VM_IP_END,
+    });
   }
 
   private authHeader(): string {
@@ -135,10 +202,11 @@ export class RealProxmox implements ProxmoxClient {
     return config.tags.split(";").map((t) => t.trim()).filter(Boolean);
   }
 
-  private toVm(q: any, tags: string[], ip?: string): ProxmoxVm {
+  private toVm(q: any, tags: string[], node: string, ip?: string): ProxmoxVm {
     const proxmoxTag = tags.find((t) => t.startsWith("vmhub-")) ?? "";
     return {
       vmid: Number(q.vmid),
+      nodeId: this.opts.nodeId ?? node,
       name: q.name || "",
       templateId: q.template ?? "",
       tags,
@@ -147,18 +215,6 @@ export class RealProxmox implements ProxmoxClient {
       status: (q.status as ProxmoxVmStatus) || "stopped",
       createdAt: q.uptime ? Date.now() - Number(q.uptime) * 1000 : Date.now(),
     };
-  }
-
-  /** Allocate the next free VM IP in the pool (10.10.10.50+). */
-  private allocVmIp(): string {
-    for (let i = this.vmIpStart; i < 200; i++) {
-      const ip = `10.10.10.${i}`;
-      if (!this.usedIps.has(ip)) {
-        this.usedIps.add(ip);
-        return ip;
-      }
-    }
-    throw vmError("HOST_CAPACITY", "vmhub IP pool exhausted (10.10.10.50-199)", false, "no-retry");
   }
 
   async listTemplates(): Promise<Template[]> {
@@ -205,14 +261,14 @@ export class RealProxmox implements ProxmoxClient {
     // (reaper matches vmhub-* tags, never VMIDs). Set it right after cloning,
     // before the VM can be observed as tag-less by any sweep.
     // A static IP is set the same way: deterministic transport, no DHCP race.
-    const vmIp = this.allocVmIp();
+    const vmIp = this.pool.allocate();
     await this.request("POST", `/nodes/${node}/qemu/${vmid}/config`, {
       tags: input.proxmoxTag,
-      ipconfig0: `ip=${vmIp}/${this.vmSubnetMask},gw=${this.vmGateway}`,
+      ipconfig0: `ip=${vmIp}/${this.pool.config.subnet.split("/")[1] ?? "24"},gw=${this.pool.config.gateway}`,
     });
     const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string };
     const tags = this.parseTags(config);
-    return this.toVm({ vmid, name: input.name, status: "provisioning" }, tags, vmIp);
+    return this.toVm({ vmid, name: input.name, status: "provisioning" }, tags, node, vmIp);
   }
 
   async startVm(vmid: number): Promise<ProxmoxVm> {
@@ -228,7 +284,7 @@ export class RealProxmox implements ProxmoxClient {
     const node = await this.node();
     const vm = await this.statusVm(vmid);
     const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string };
-    return this.toVm({ ...vm, vmid }, this.parseTags(config));
+    return this.toVm({ ...vm, vmid }, this.parseTags(config), node);
   }
 
   async listVms(): Promise<ProxmoxVm[]> {
@@ -239,7 +295,7 @@ export class RealProxmox implements ProxmoxClient {
       if (v.node !== node) continue;
       const config = (await this.request("GET", `/nodes/${node}/qemu/${v.vmid}/config`)) as { tags?: string };
       const tags = this.parseTags(config);
-      if (tags.some((t) => t.startsWith("vmhub-"))) out.push(this.toVm(v, tags));
+      if (tags.some((t) => t.startsWith("vmhub-"))) out.push(this.toVm(v, tags, node));
     }
     return out;
   }
@@ -293,6 +349,53 @@ export class RealProxmox implements ProxmoxClient {
     // storage by the pool name; the installer registers zfspool <pool>.
     return process.env.PVE_STORAGE || "vmhub";
   }
+}
+
+/**
+ * Plain per-node configuration for the control plane: one entry per node,
+ * from which a RealProxmox client (and its static-NAT pool) is constructed.
+ * No env access — the caller owns where config comes from.
+ */
+export interface RealProxmoxNodeConfig {
+  /** vmhub node id — allocator key and the Proxmox node name. */
+  nodeId: string;
+  /** API base "host[:port]", e.g. "192.168.1.220:8006". */
+  baseUrl: string;
+  tokenId?: string;
+  token: string;
+  /** Static-NAT pool for this node's VMs. Defaults: 10.10.10.0/24, gw .1, 50-199. */
+  ipPool?: {
+    subnet?: string;
+    gateway?: string;
+    /** First host octet handed out (inclusive), default 50. */
+    start?: number;
+    /** Last host octet handed out (inclusive), default 199. */
+    end?: number;
+  };
+  basePath?: string;
+  insecure?: boolean;
+}
+
+/** Per-node client factory — one RealProxmox per node for the control plane. */
+export function createRealProxmox(config: RealProxmoxNodeConfig): RealProxmox {
+  const pool = config.ipPool ?? {};
+  return new RealProxmox({
+    host: config.baseUrl,
+    tokenId: config.tokenId ?? DEFAULT_TOKEN_ID,
+    token: config.token,
+    nodeId: config.nodeId,
+    basePath: config.basePath,
+    insecure: config.insecure,
+    vmSubnet: pool.subnet,
+    vmGateway: pool.gateway,
+    vmIpStart: pool.start !== undefined ? hostIp(pool.subnet ?? VM_NETWORK, pool.start) : undefined,
+    vmIpEnd: pool.end,
+  });
+}
+
+/** "10.10.10.0/24", 50 → "10.10.10.50" — octet-based config to legacy IP string. */
+function hostIp(subnet: string, octet: number): string {
+  return `${subnet.split("/")[0]!.split(".").slice(0, 3).join(".")}.${octet}`;
 }
 
 function isVmError(e: unknown): e is VmError {
