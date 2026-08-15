@@ -152,6 +152,29 @@ export interface TemplateConstraint {
   runtime?: string;
 }
 
+/**
+ * Static node registration — config, never probed state. The control plane
+ * resolves one Proxmox client per node from this. Live fields (status,
+ * diskFreePct, goldens) live on VmNode and come from the shared probe loop.
+ */
+export interface NodeConfig {
+  /** Stable node id — must match VmNode.id and Vm.nodeId. */
+  id: string;
+  /** API base URL (host[:port]); resolved at request time, never cached. */
+  baseUrl: string;
+  /** Env var name holding this node's scoped automation token. */
+  tokenEnv: string;
+  /** Static host metadata for constraint evaluation. */
+  metadata: {
+    /** OS families this node can host. */
+    os: WindowingSystem[];
+    avx2: boolean;
+    nestedVirt: boolean;
+    /** Total RAM MB. */
+    ramMb: number;
+  };
+}
+
 export interface Vm {
   /** vmhub-owned uuid. The ONLY stable identity; VMIDs are never trusted. */
   uuid: string;
