@@ -62,8 +62,11 @@ class FakeLite implements LiteClient {
   templates: Template[] = [];
   artifacts: ArtifactRecord[] = [];
   createLeaseCalls: Array<{ templateId: string; requestId: string }> = [];
+  /** When true, getTemplates() throws — simulates lite being unreachable. */
+  failTemplates = false;
 
-  constructor(vmAdapter: string) {
+  constructor(vmAdapter: string, templates: Template[] = []) {
+    this.templates = templates;
     const vm: Vm = {
       uuid: 'vm-0001',
       templateId: vmAdapter,
@@ -79,6 +82,12 @@ class FakeLite implements LiteClient {
   }
 
   async createLease(input: { templateId: string; owner: string; requestId: string; ttlMs?: number }): Promise<LeaseResponse> {
+    // STRICT when a catalog is seeded: lite rejects ids it cannot clone
+    // (mirrors MockProxmox/RealProxmox). Issue #10: the server must resolve
+    // adapter aliases ('x11') to real VMIDs ('2060') before calling lite.
+    if (this.templates.length > 0 && !this.templates.some((t) => t.id === input.templateId)) {
+      throw vmError('NOT_FOUND', `template '${input.templateId}' not found`);
+    }
     this.createLeaseCalls.push({ templateId: input.templateId, requestId: input.requestId });
     const vm = this.vms[0]!;
     const lease: Lease = {
@@ -115,6 +124,7 @@ class FakeLite implements LiteClient {
   }
 
   async getTemplates(): Promise<Template[]> {
+    if (this.failTemplates) throw vmError('NOT_FOUND', 'lite unreachable: template catalog unavailable');
     return this.templates;
   }
 
@@ -289,12 +299,25 @@ describe('template catalog', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Real-catalog fixture (issue #10): ids are actual Proxmox VMIDs, not
+// adapter aliases. The RESOLVED VMID is what lite must receive.
+// ---------------------------------------------------------------------------
+
+function realCatalog(): Template[] {
+  return [
+    { id: '2030', os: 'headless', availability: 'available', capabilities: [], ramMb: 4096, vcpus: 2, nestedVirt: false },
+    { id: '2060', os: 'x11', availability: 'available', capabilities: [], ramMb: 4096, vcpus: 2, nestedVirt: false },
+    { id: '2070', os: 'hyprland', availability: 'available', capabilities: [], ramMb: 4096, vcpus: 2, nestedVirt: false },
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // Lease lifecycle (FakeLite-backed — no HTTP, no host)
 // ---------------------------------------------------------------------------
 
 describe('lease lifecycle tools', () => {
-  it('vm_lease_create forwards template_id/owner/request_id to lite', async () => {
-    const lite = new FakeLite('x11');
+  it('vm_lease_create resolves an adapter alias and forwards the real VMID to lite (issue #10)', async () => {
+    const lite = new FakeLite('x11', realCatalog());
     const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
     const res = await client.callTool({
       name: 'vm_lease_create',
@@ -303,7 +326,8 @@ describe('lease lifecycle tools', () => {
     const sc = res.structuredContent as { ok?: boolean; result?: { vm?: { uuid?: string } } };
     expect(sc.ok).toBe(true);
     expect(sc.result?.vm?.uuid).toBe('vm-0001');
-    expect(lite.createLeaseCalls).toContainEqual({ templateId: 'x11', requestId: 'req-1' });
+    // The RESOLVED VMID must be forwarded to lite, never the adapter alias.
+    expect(lite.createLeaseCalls).toContainEqual({ templateId: '2060', requestId: 'req-1' });
   });
 
   it('vm_lease_create accepts a real Proxmox VMID template from the lite catalog (issue #3 E2E contract)', async () => {
@@ -323,6 +347,46 @@ describe('lease lifecycle tools', () => {
     expect(sc.ok).toBe(true);
     expect(sc.result?.vm?.uuid).toBe('vm-0001');
     expect(lite.createLeaseCalls).toContainEqual({ templateId: '2060', requestId: 'req-2060' });
+  });
+
+  it('vm_lease_create refuses a template with no live golden (typed CAPABILITY_UNAVAILABLE)', async () => {
+    const lite = new FakeLite('x11', realCatalog());
+    const { client } = await connectServer({ lite });
+    const res = await client.callTool({
+      name: 'vm_lease_create',
+      arguments: { template_id: 'windows', owner: 'me', request_id: 'req-3' },
+    });
+    expect(res.isError).toBe(true);
+    const sc = res.structuredContent as { error?: { code?: string; message?: string } };
+    expect(sc.error?.code).toBe('CAPABILITY_UNAVAILABLE');
+    expect(sc.error?.message).toContain('windows');
+  });
+
+  it('vm_lease_create with an unknown template id → typed NOT_FOUND', async () => {
+    const lite = new FakeLite('x11', realCatalog());
+    const { client } = await connectServer({ lite });
+    const res = await client.callTool({
+      name: 'vm_lease_create',
+      arguments: { template_id: '9999', owner: 'me', request_id: 'req-4' },
+    });
+    expect(res.isError).toBe(true);
+    const sc = res.structuredContent as { error?: { code?: string } };
+    expect(sc.error?.code).toBe('NOT_FOUND');
+  });
+
+  it('vm_lease_create degrades to the local matrix when lite is unreachable — typed error, never an uncaught exception', async () => {
+    const lite = new FakeLite('x11', realCatalog());
+    lite.failTemplates = true;
+    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
+    const res = await client.callTool({
+      name: 'vm_lease_create',
+      arguments: { template_id: 'x11', owner: 'me', request_id: 'req-5' },
+    });
+    expect(res.isError).toBe(true);
+    const sc = res.structuredContent as { ok?: boolean; error?: { code?: string; message?: string } };
+    expect(sc.ok).toBe(false);
+    expect(typeof sc.error?.code).toBe('string');
+    expect(sc.error?.message?.length ?? 0).toBeGreaterThan(0);
   });
 
   it('vm_lease_status resolves the leased VM', async () => {
