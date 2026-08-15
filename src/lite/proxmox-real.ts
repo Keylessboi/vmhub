@@ -13,6 +13,7 @@
  * the tag; listVms filters to tagged VMs.
  */
 import type { Template, VmError } from "../shared/types.ts";
+import { osCapabilities } from "../shared/os-capabilities.ts";
 import type { CreateProxmoxVmInput, ProxmoxClient, ProxmoxVm, ProxmoxVmStatus } from "./proxmox.ts";
 
 export interface RealProxmoxOptions {
@@ -59,11 +60,13 @@ export function osFromTemplateName(name: string | undefined): Template["os"] {
 
 /**
  * Capability surface a clone of this template will have, per adapter OS.
- * Headless goldens (debian-13-golden) get exec only — never a display claim.
+ * Derived from the adapter registry (src/shared/os-capabilities.ts) so the
+ * catalog can never silently drift from what the adapters actually serve:
+ * headless goldens (debian-13-golden) get exec only, x11 advertises exec,
+ * hyprland/windows do not.
  */
 function templateCapabilities(os: Template["os"]): Template["capabilities"] {
-  if (os === "headless") return ["exec"];
-  return ["screenshot", "inspect", "list_windows", "click", "type", "key", "drag", "exec"];
+  return osCapabilities(os);
 }
 
 export class RealProxmox implements ProxmoxClient {
@@ -233,10 +236,13 @@ export class RealProxmox implements ProxmoxClient {
 
   async listVms(): Promise<ProxmoxVm[]> {
     const node = await this.node();
+    // /cluster/resources?type=vm ALSO lists LXC containers (type=lxc); only
+    // qemu entries have a qemu-server config to fetch. Asking for the config
+    // of an lxc id would 404 and abort the whole identity sweep.
     const vms = (await this.request("GET", `/cluster/resources?type=vm`)) as any[];
     const out: ProxmoxVm[] = [];
     for (const v of vms ?? []) {
-      if (v.node !== node) continue;
+      if (v.node !== node || v.type !== "qemu") continue;
       const config = (await this.request("GET", `/nodes/${node}/qemu/${v.vmid}/config`)) as { tags?: string };
       const tags = this.parseTags(config);
       if (tags.some((t) => t.startsWith("vmhub-"))) out.push(this.toVm(v, tags));
