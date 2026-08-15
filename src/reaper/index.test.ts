@@ -16,17 +16,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MockProxmox, type ProxmoxClient } from "../lite/proxmox.ts";
+import { RealProxmox } from "../lite/proxmox-real.ts";
 import type { ArtifactRecord, Lease, Vm } from "../shared/types.ts";
 import {
   DEFAULT_DISK_FULL_REFUSAL_PCT,
   DEFAULT_DRAIN_TIMEOUT_MS,
+  createClientForNode,
+  defaultNodeConfig,
   findVmByIdentity,
   isDraining,
   isLeaseExpired,
+  resolveNodeConfigs,
   runOnce,
   sweep,
+  sweepNodes,
+  type SweepNode,
 } from "./index.ts";
-import { loadDbDriver, openReaperDb, resolveReaperDbPath, SCHEMA_SQL, type DbConnection } from "./reaper.db.ts";
+import { loadDbDriver, openReaperDb, resolveReaperDbPath, SCHEMA_SQL, type DbConnection, type ReaperDb } from "./reaper.db.ts";
+import { FileSweepLedger, InMemorySweepLedger, STUCK_THRESHOLD } from "./ledger.ts";
 
 const HOUR = 60 * 60 * 1000;
 
@@ -88,12 +95,13 @@ async function seedLease(fx: Fixture, seed: LeaseSeed, vmid = 1000): Promise<voi
   const { vm, lease, artifacts = [] } = seed;
   conn
     .prepare(
-      `INSERT INTO vms (uuid, vmid, templateId, adapter, capabilities, proxmoxTag, namePrefix, status, sshPort, scratchDir, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO vms (uuid, vmid, nodeId, templateId, adapter, capabilities, proxmoxTag, namePrefix, status, sshPort, scratchDir, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       vm.uuid,
       vmid,
+      vm.nodeId,
       vm.templateId,
       vm.adapter,
       JSON.stringify(vm.capabilities),
@@ -576,5 +584,402 @@ describe("reaper sweep", () => {
     });
     expect(report.scanned).toBe(1);
     expect(typeof report.destroyed).toBe("number");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-node fail-closed sweep (plan T9)
+// ---------------------------------------------------------------------------
+
+/** A per-node SweepNode wrapping one MockProxmox client. */
+function node(id: string, client: ProxmoxClient): SweepNode {
+  return { config: defaultNodeConfig(id), createClient: () => client };
+}
+
+/** A MockProxmox whose reachability probe fails (auth/connect error). */
+function unreachableMock(id = "dl360p"): MockProxmox {
+  const client = new MockProxmox(id);
+  client.listVms = async () => {
+    throw new Error(`connect ECONNREFUSED 10.0.0.9:8006 (node ${id})`);
+  };
+  return client;
+}
+
+describe("multi-node fail-closed sweep", () => {
+  let fx: Fixture;
+  let db: ReaperDb | undefined;
+
+  beforeEach(async () => {
+    fx = await makeFixture();
+  });
+
+  afterEach(async () => {
+    try {
+      await db?.close();
+    } catch {
+      // already closed (e.g. runOnce closed its own handle)
+    }
+    db = undefined;
+    await rm(fx.dir, { recursive: true, force: true });
+  });
+
+  it("defers an unreachable node's leases, keeps the rows, and retries next sweep", async () => {
+    const client = unreachableMock();
+    const now = Date.now();
+    await seedLease(fx, {
+      vm: makeVm(fx),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+    });
+    db = await openReaperDb(fx.dbPath);
+    const ledger = new InMemorySweepLedger();
+    const opts = { artifactDir: fx.artifactDir, now: () => now, ledger };
+
+    const first = await sweepNodes(db, [node("dl360p", client)], opts);
+
+    // Fail-closed: nothing destroyed, nothing reported clean.
+    expect(first.destroyed).toBe(0);
+    expect(first.nodes).toHaveLength(1);
+    expect(first.nodes[0]?.outcome).toBe("auth-failed");
+    expect(first.nodes[0]?.deferred).toBe(1);
+    expect(first.nodes[0]?.error).toMatch(/ECONNREFUSED/);
+    // Rows kept — the VM survives for when the node returns.
+    expect(db.listLeasesWithVm()).toHaveLength(1);
+    expect(ledger.getNode("dl360p")?.consecutiveAuthFailures).toBe(1);
+    expect(ledger.getNode("dl360p")?.lastOutcome).toBe("auth-failed");
+
+    // Retry next sweep: still unreachable → still deferred, counter climbs.
+    const second = await sweepNodes(db, [node("dl360p", client)], opts);
+    expect(second.nodes[0]?.outcome).toBe("auth-failed");
+    expect(db.listLeasesWithVm()).toHaveLength(1);
+    expect(ledger.getNode("dl360p")?.consecutiveAuthFailures).toBe(2);
+    expect(ledger.getNode("dl360p")?.deferredBatches).toBe(2);
+  });
+
+  it("flips a node to stuck after 3 consecutive auth-failed sweeps and emits an alert", async () => {
+    const client = unreachableMock();
+    const now = Date.now();
+    await seedLease(fx, {
+      vm: makeVm(fx),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+    });
+    db = await openReaperDb(fx.dbPath);
+    const ledger = new InMemorySweepLedger();
+    const opts = { artifactDir: fx.artifactDir, now: () => now, ledger };
+
+    const r1 = await sweepNodes(db, [node("dl360p", client)], opts);
+    const r2 = await sweepNodes(db, [node("dl360p", client)], opts);
+    expect(r1.alerts).toEqual([]);
+    expect(r2.alerts).toEqual([]);
+
+    const r3 = await sweepNodes(db, [node("dl360p", client)], opts);
+    expect(r3.alerts).toHaveLength(1);
+    expect(r3.alerts[0]).toMatch(/STUCK/);
+    expect(r3.nodes[0]?.outcome).toBe("stuck");
+    expect(r3.nodes[0]?.status).toBe("stuck");
+    expect(r3.nodes[0]?.deferred).toBe(1);
+    expect(ledger.getNode("dl360p")?.status).toBe("stuck");
+    expect(ledger.getNode("dl360p")?.consecutiveAuthFailures).toBe(STUCK_THRESHOLD);
+    // Still fail-closed: rows kept, never destroyed by inference.
+    expect(db.listLeasesWithVm()).toHaveLength(1);
+    expect(r3.destroyed).toBe(0);
+  });
+
+  it("treats a 404 during a specific teardown as clean (VM already gone) and finishes cleanup", async () => {
+    const proxmox = new MockProxmox();
+    await seedProxmoxVm(proxmox, fx);
+    // The VM vanished between the identity scan and the destroy call (race).
+    proxmox.destroyVm = async () => {
+      throw { code: "NOT_FOUND", message: "proxmox vm 1000 not found", retryable: false, hint: "no-retry" };
+    };
+    const now = Date.now();
+    await seedLease(fx, {
+      vm: makeVm(fx),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+    });
+    db = await openReaperDb(fx.dbPath);
+
+    const report = await sweepNodes(db, [node("dl360p", proxmox)], {
+      artifactDir: fx.artifactDir,
+      now: () => now,
+    });
+
+    // 404 = already gone → clean; file + row cleanup still runs.
+    expect(report.destroyed).toBe(1);
+    expect(report.errors).toEqual([]);
+    expect(db.listLeasesWithVm()).toHaveLength(0);
+  });
+
+  it("cleans up leases whose VM is already gone (identity scan finds nothing)", async () => {
+    const proxmox = new MockProxmox(); // no VM seeded — already gone
+    const now = Date.now();
+    await seedLease(fx, {
+      vm: makeVm(fx),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+    });
+    db = await openReaperDb(fx.dbPath);
+
+    const report = await sweepNodes(db, [node("dl360p", proxmox)], {
+      artifactDir: fx.artifactDir,
+      now: () => now,
+    });
+
+    expect(report.destroyed).toBe(1);
+    expect(report.nodes[0]?.outcome).toBe("ok");
+    expect(db.listLeasesWithVm()).toHaveLength(0);
+  });
+
+  it("reconciles deferred leases when the node comes back (sweep-on-return, idempotent by tag)", async () => {
+    const client = new MockProxmox();
+    await seedProxmoxVm(client, fx);
+    const originalListVms = client.listVms.bind(client);
+    const now = Date.now();
+    await seedLease(fx, {
+      vm: makeVm(fx),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+    });
+    db = await openReaperDb(fx.dbPath);
+    const ledger = new InMemorySweepLedger();
+    const opts = { artifactDir: fx.artifactDir, now: () => now, ledger };
+
+    // Node goes down → leases deferred, rows kept.
+    client.listVms = async () => {
+      throw new Error("connect ECONNREFUSED 10.0.0.9:8006");
+    };
+    const down = await sweepNodes(db, [node("dl360p", client)], opts);
+    expect(down.nodes[0]?.outcome).toBe("auth-failed");
+    expect(db.listLeasesWithVm()).toHaveLength(1);
+
+    // Node returns → the normal sweep destroys by tag and resets the counters.
+    client.listVms = originalListVms;
+    const up = await sweepNodes(db, [node("dl360p", client)], opts);
+    expect(up.nodes[0]?.outcome).toBe("ok");
+    expect(up.destroyed).toBe(1);
+    expect(await client.listVms()).toEqual([]);
+    expect(db.listLeasesWithVm()).toHaveLength(0);
+    expect(ledger.getNode("dl360p")?.consecutiveAuthFailures).toBe(0);
+    expect(ledger.getNode("dl360p")?.status).toBe("online");
+    expect(ledger.getNode("dl360p")?.destroyedTotal).toBe(1);
+  });
+
+  it("durable ledger state survives a reaper restart (new instance, same file)", async () => {
+    const now = Date.now();
+    await seedLease(fx, {
+      vm: makeVm(fx),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+    });
+    const ledgerPath = join(fx.dir, "sweeps.jsonl");
+    const down = unreachableMock();
+
+    // Reaper instance 1: two sweeps while the node is down.
+    {
+      const dbA = await openReaperDb(fx.dbPath);
+      const ledgerA = new FileSweepLedger(ledgerPath);
+      await ledgerA.load();
+      await sweepNodes(dbA, [node("dl360p", down)], { artifactDir: fx.artifactDir, now: () => now, ledger: ledgerA });
+      await sweepNodes(dbA, [node("dl360p", down)], { artifactDir: fx.artifactDir, now: () => now, ledger: ledgerA });
+      await ledgerA.flush();
+      ledgerA.close();
+      dbA.close();
+    }
+
+    // Restart: a brand-new ledger object reconstructs the same counters.
+    {
+      const ledgerB = new FileSweepLedger(ledgerPath);
+      await ledgerB.load();
+      expect(ledgerB.getNode("dl360p")?.consecutiveAuthFailures).toBe(2);
+      expect(ledgerB.getNode("dl360p")?.deferredBatches).toBe(2);
+      expect(ledgerB.getNode("dl360p")?.status).toBe("offline");
+      ledgerB.close();
+    }
+
+    // Restart + node returns → the resumed sweep reconciles and resets counters.
+    {
+      const up = new MockProxmox();
+      await seedProxmoxVm(up, fx);
+      const dbB = await openReaperDb(fx.dbPath);
+      const ledgerC = new FileSweepLedger(ledgerPath);
+      await ledgerC.load();
+      const report = await sweepNodes(dbB, [node("dl360p", up)], {
+        artifactDir: fx.artifactDir,
+        now: () => now,
+        ledger: ledgerC,
+      });
+      expect(report.destroyed).toBe(1);
+      expect(dbB.listLeasesWithVm()).toHaveLength(0);
+      await ledgerC.flush();
+      expect(ledgerC.getNode("dl360p")?.consecutiveAuthFailures).toBe(0);
+      expect(ledgerC.getNode("dl360p")?.destroyedTotal).toBe(1);
+
+      // One more restart: nothing to re-destroy (rows are the ground truth).
+      const ledgerD = new FileSweepLedger(ledgerPath);
+      await ledgerD.load();
+      const again = await sweepNodes(dbB, [node("dl360p", up)], {
+        artifactDir: fx.artifactDir,
+        now: () => now,
+        ledger: ledgerD,
+      });
+      expect(again.scanned).toBe(0);
+      expect(again.destroyed).toBe(0);
+      ledgerD.close();
+      dbB.close();
+    }
+  });
+
+  it("groups expired leases per node and destroys each on its own node's client only", async () => {
+    const now = Date.now();
+
+    // dl360p: one expired lease (VM-A) + an unrelated VM that must survive.
+    await seedLease(fx, {
+      vm: makeVm(fx),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+    });
+    const clientA = new MockProxmox("dl360p");
+    await clientA.createVm({ templateId: "windows-11-24h2", name: `${fx.namePrefix}-${fx.uuid}`, proxmoxTag: fx.proxmoxTag });
+    await clientA.createVm({ templateId: "windows-11-24h2", name: "other-0000", proxmoxTag: "vmhub-other-0000" });
+
+    // vostro: one expired lease (VM-B) on the second node.
+    const uuidB = "a1b2c3d4-0000-4000-8000-000000000002";
+    const vmB = makeVm(fx, { uuid: uuidB, nodeId: "vostro", namePrefix: "vstr", proxmoxTag: `vmhub-vstr-${uuidB}` });
+    await seedLease(
+      fx,
+      { vm: vmB, lease: makeLease(fx, { vmId: uuidB, requestId: "req-vostro", expiresAt: now - 1000 }) },
+      1001,
+    );
+    const clientB = new MockProxmox("vostro");
+    await clientB.createVm({ templateId: "windows-11-24h2", name: `vstr-${uuidB}`, proxmoxTag: `vmhub-vstr-${uuidB}` });
+
+    db = await openReaperDb(fx.dbPath);
+    const report = await sweepNodes(
+      db,
+      [node("dl360p", clientA), node("vostro", clientB)],
+      { artifactDir: fx.artifactDir, now: () => now },
+    );
+
+    expect(report.scanned).toBe(2);
+    expect(report.destroyed).toBe(2);
+    expect(report.nodes).toHaveLength(2);
+    expect(report.nodes.map((n) => [n.nodeId, n.destroyed])).toEqual([
+      ["dl360p", 1],
+      ["vostro", 1],
+    ]);
+    // Each VM was destroyed on ITS OWN node's client; the foreign VM survived.
+    const remainingA = await clientA.listVms();
+    expect(remainingA).toHaveLength(1);
+    expect(remainingA[0]?.proxmoxTag).toBe("vmhub-other-0000");
+    expect(await clientB.listVms()).toEqual([]);
+    expect(db.listLeasesWithVm()).toHaveLength(0);
+  });
+
+  it("defers leases whose node has no registry entry (never destroys by inference)", async () => {
+    const now = Date.now();
+    await seedLease(fx, {
+      vm: makeVm(fx, { nodeId: "unknown-node" }),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+    });
+    db = await openReaperDb(fx.dbPath);
+
+    const report = await sweepNodes(db, [node("dl360p", new MockProxmox())], {
+      artifactDir: fx.artifactDir,
+      now: () => now,
+    });
+
+    expect(report.destroyed).toBe(0);
+    expect(report.alerts).toHaveLength(1);
+    expect(report.alerts[0]).toMatch(/no node config for nodeId 'unknown-node'/);
+    expect(db.listLeasesWithVm()).toHaveLength(1);
+  });
+
+  it("rejects an expired lease while draining (existing doctrine) without counting it destroyed", async () => {
+    const proxmox = new MockProxmox();
+    await seedProxmoxVm(proxmox, fx);
+    const now = Date.now();
+    await seedLease(fx, {
+      vm: makeVm(fx),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+      artifacts: [
+        { id: "art-1", leaseId: fx.uuid, hostPath: "big.bin", sizeBytes: 1, inFlight: true, createdAt: now - 1000 },
+      ],
+    });
+    db = await openReaperDb(fx.dbPath);
+
+    const report = await sweepNodes(db, [node("dl360p", proxmox)], {
+      artifactDir: fx.artifactDir,
+      now: () => now,
+    });
+
+    expect(report.draining).toBe(1);
+    expect(report.destroyed).toBe(0);
+    expect(report.nodes[0]?.outcome).toBe("deferred");
+    expect((await proxmox.listVms()).length).toBe(1);
+  });
+});
+
+describe("node registry resolution", () => {
+  const ENV_NAMES = [
+    "VMHUB_NODES",
+    "VMHUB_NODE_DL360P_BASE_URL",
+    "VMHUB_NODE_DL360P_TOKEN",
+    "VMHUB_NODE_VOSTRO_BASE_URL",
+    "VMHUB_NODE_VOSTRO_TOKEN",
+    "PVE_HOST",
+    "PVE_TOKEN",
+    "PVE_TOKEN_ID",
+  ] as const;
+  const saved = new Map<string, string | undefined>();
+
+  beforeEach(() => {
+    for (const name of ENV_NAMES) saved.set(name, process.env[name]);
+  });
+
+  afterEach(() => {
+    for (const name of ENV_NAMES) {
+      const value = saved.get(name);
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    saved.clear();
+  });
+
+  it("defaults to a single dl360p node reading the legacy PVE_* env", () => {
+    const cfgs = resolveNodeConfigs({});
+    expect(cfgs).toHaveLength(1);
+    expect(cfgs[0]?.id).toBe("dl360p");
+    expect(cfgs[0]?.tokenEnv).toBe("PVE_TOKEN");
+    expect(cfgs[0]?.baseUrl).toBe("");
+  });
+
+  it("resolves a multi-node fleet from VMHUB_NODES + per-node env", () => {
+    const cfgs = resolveNodeConfigs({
+      VMHUB_NODES: "dl360p, vostro",
+      VMHUB_NODE_DL360P_BASE_URL: "10.0.0.2:8006",
+      VMHUB_NODE_VOSTRO_BASE_URL: "10.0.0.3:8006",
+      VMHUB_NODE_VOSTRO_TOKEN: "secret",
+    });
+    expect(cfgs.map((c) => c.id)).toEqual(["dl360p", "vostro"]);
+    expect(cfgs[1]?.baseUrl).toBe("10.0.0.3:8006");
+    expect(cfgs[1]?.tokenEnv).toBe("VMHUB_NODE_VOSTRO_TOKEN");
+    expect(cfgs[0]?.baseUrl).toBe("10.0.0.2:8006");
+    // Default node still falls back to the legacy PVE_TOKEN naming.
+    expect(cfgs[0]?.tokenEnv).toBe("PVE_TOKEN");
+  });
+
+  it("createClientForNode builds a node-aware MockProxmox when no token is set", () => {
+    const client = createClientForNode(defaultNodeConfig("vostro"));
+    expect(client).toBeInstanceOf(MockProxmox);
+    expect((client as MockProxmox).nodeId).toBe("vostro");
+  });
+
+  it("createClientForNode builds a RealProxmox when token + baseUrl are present", () => {
+    process.env.VMHUB_NODE_VOSTRO_BASE_URL = "10.0.0.3:8006";
+    process.env.VMHUB_NODE_VOSTRO_TOKEN = "secret";
+    const cfg = resolveNodeConfigs({
+      VMHUB_NODES: "vostro",
+      VMHUB_NODE_VOSTRO_BASE_URL: "10.0.0.3:8006",
+      VMHUB_NODE_VOSTRO_TOKEN: "secret",
+    })[0]!;
+    const client = createClientForNode(cfg);
+    expect(client).toBeInstanceOf(RealProxmox);
+    const opts = (client as unknown as { opts: { nodeId?: string } }).opts;
+    expect(opts.nodeId).toBe("vostro");
   });
 });
