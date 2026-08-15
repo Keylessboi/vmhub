@@ -34,10 +34,10 @@ LOG=/var/log/vmhub-golden-refresh.log
     chmod -R a+rX /opt/hyprland-mcp
   fi
 
-  # ---- x11: pull latest computer-use-linux (npm) ----
+  # ---- x11: pull pinned computer-use-linux (npm) ----
   if command -v computer-use-linux >/dev/null 2>&1; then
-    npm update -g @agent-sh/computer-use-linux 2>&1 || true
-    echo "computer-use-linux: updated"
+    npm install -g @agent-sh/computer-use-linux@0.4.9 2>&1 || true
+    echo "computer-use-linux: pinned 0.4.9"
   fi
 
   # ---- mark done so subsequent boots skip (freshness at birth, not drift) ----
