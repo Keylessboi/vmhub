@@ -133,6 +133,7 @@ async function seedLease(fx: Fixture, seed: LeaseSeed, vmid = 1000): Promise<voi
 function makeVm(fx: Fixture, overrides: Partial<Vm> = {}): Vm {
   return {
     uuid: fx.uuid,
+    nodeId: 'dl360p',
     templateId: "windows-11-24h2",
     adapter: "windows",
     capabilities: ["screenshot", "click", "type", "get_file"],

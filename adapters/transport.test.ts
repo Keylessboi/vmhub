@@ -9,6 +9,7 @@ import type { Vm } from '../src/shared/types.ts';
 
 const vm: Vm = {
   uuid: 'u1',
+  nodeId: 'dl360p',
   templateId: 'tpl',
   adapter: 'x11',
   capabilities: ['screenshot'],

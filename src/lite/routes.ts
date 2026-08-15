@@ -33,6 +33,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { ProxmoxClient } from "./proxmox.ts";
 import { isVmError } from "./proxmox.ts";
+import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 import type { LeaseRow, LeaseStatus, LiteDb, VmRow } from "./db.ts";
 import type {
   ArtifactRecord,
@@ -105,6 +106,7 @@ const HTTP_STATUS: Record<ErrorCode, number> = {
   CAPABILITY_UNAVAILABLE: 409,
   QUOTA_EXCEEDED: 403,
   HOST_CAPACITY: 503,
+  NODE_UNAVAILABLE: 503,
   DISK_FULL: 507,
   BOOT_TIMEOUT: 503,
   LOCK_CONTENTION: 409,
@@ -274,6 +276,7 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
   const vm: VmRow = {
     uuid,
     vmid: 0, // filled from proxmox.createVm
+    nodeId: DEFAULT_NODE_ID, // single-node default; registry-driven routing lands in the multi-node milestone
     templateId,
     adapter: tpl.os,
     capabilities: tpl.capabilities,

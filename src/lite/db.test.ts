@@ -9,6 +9,7 @@ function vmRow(uuid: string, vmid = 1000): VmRow {
   return {
     uuid,
     vmid,
+    nodeId: 'dl360p',
     templateId: "hyprland-2404",
     adapter: "hyprland",
     capabilities: ["screenshot", "click"],

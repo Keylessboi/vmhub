@@ -67,6 +67,7 @@ class FakeLite implements LiteClient {
     this.templates = templates ?? [];
     const vm: Vm = {
       uuid: 'vm-0001',
+      nodeId: 'dl360p',
       templateId: vmAdapter,
       adapter: vmAdapter,
       capabilities: [],

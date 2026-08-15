@@ -29,6 +29,7 @@ export const DEFAULT_HINT: Record<ErrorCode, VmError['hint']> = {
   CAPABILITY_UNAVAILABLE: 'no-retry',
   QUOTA_EXCEEDED: 'wait-then-retry',
   HOST_CAPACITY: 'wait-then-retry',
+  NODE_UNAVAILABLE: 'wait-then-retry',
   DISK_FULL: 'teardown-then-retry',
   BOOT_TIMEOUT: 'teardown-then-retry',
   LOCK_CONTENTION: 'retry-with-backoff',

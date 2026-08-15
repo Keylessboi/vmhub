@@ -14,6 +14,7 @@
 import { mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { ArtifactRecord, Vm } from "../shared/types.ts";
+import { ARTIFACTS_COLUMNS, DEFAULT_NODE_ID, LEASES_COLUMNS, SCHEMA_SQL, VMS_COLUMNS } from "../shared/schema.ts";
 
 export type LeaseStatus = "active" | "released";
 
@@ -78,50 +79,6 @@ export interface VmRow extends Vm {
   vmid: number;
 }
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS vms (
-  uuid         TEXT PRIMARY KEY,
-  vmid         INTEGER NOT NULL UNIQUE,
-  templateId   TEXT NOT NULL,
-  adapter      TEXT NOT NULL,
-  capabilities TEXT NOT NULL,
-  proxmoxTag   TEXT NOT NULL,
-  namePrefix   TEXT NOT NULL,
-  status       TEXT NOT NULL,
-  sshPort      INTEGER,
-  ip           TEXT,
-  scratchDir   TEXT,
-  createdAt    INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS leases (
-  vmId          TEXT PRIMARY KEY,
-  owner         TEXT NOT NULL,
-  requestId     TEXT NOT NULL UNIQUE,
-  status        TEXT NOT NULL,
-  expiresAt     INTEGER NOT NULL,
-  lastRenewedAt INTEGER NOT NULL,
-  renewCount    INTEGER NOT NULL,
-  maxLifetimeMs INTEGER NOT NULL,
-  createdAt     INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS artifacts (
-  id        TEXT PRIMARY KEY,
-  leaseId   TEXT NOT NULL,
-  hostPath  TEXT NOT NULL,
-  sizeBytes INTEGER NOT NULL,
-  inFlight  INTEGER NOT NULL DEFAULT 0,
-  createdAt INTEGER NOT NULL
-);
-`;
-
-const VMS_COLUMNS =
-  "uuid, vmid, templateId, adapter, capabilities, proxmoxTag, namePrefix, status, sshPort, ip, scratchDir, createdAt";
-const LEASES_COLUMNS =
-  "vmId, owner, requestId, status, expiresAt, lastRenewedAt, renewCount, maxLifetimeMs, createdAt";
-const ARTIFACTS_COLUMNS = "id, leaseId, hostPath, sizeBytes, inFlight, createdAt";
-
 export class LiteDb {
   private db: DbConnection;
 
@@ -130,11 +87,14 @@ export class LiteDb {
       mkdirSync(dirname(path), { recursive: true });
     }
     this.db = new dbCtor(path);
-    this.db.exec(SCHEMA);
-    // Idempotent migration: add columns introduced after the table existed.
+    this.db.exec(SCHEMA_SQL);
+    // Idempotent migrations: add columns introduced after the table existed.
     const cols = this.db.prepare("PRAGMA table_info(vms)").all() as { name: string }[];
     if (!cols.some((c) => c.name === "ip")) {
       this.db.exec("ALTER TABLE vms ADD COLUMN ip TEXT;");
+    }
+    if (!cols.some((c) => c.name === "nodeId")) {
+      this.db.exec(`ALTER TABLE vms ADD COLUMN nodeId TEXT NOT NULL DEFAULT '${DEFAULT_NODE_ID}';`);
     }
   }
 
@@ -150,11 +110,12 @@ export class LiteDb {
     this.db
       .prepare(
         `INSERT INTO vms (${VMS_COLUMNS})
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         vm.uuid,
         vm.vmid,
+        vm.nodeId,
         vm.templateId,
         vm.adapter,
         JSON.stringify(vm.capabilities),
@@ -321,6 +282,7 @@ function rowToVm(row: unknown): VmRow | null {
   return {
     uuid: String(r.uuid),
     vmid: Number(r.vmid),
+    nodeId: r.nodeId == null ? DEFAULT_NODE_ID : String(r.nodeId),
     templateId: String(r.templateId),
     adapter: String(r.adapter),
     capabilities: JSON.parse(String(r.capabilities)) as Vm["capabilities"],

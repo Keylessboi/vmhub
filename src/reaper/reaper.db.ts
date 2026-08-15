@@ -15,6 +15,7 @@
 
 import type { ArtifactRecord, Lease, Vm, VmStatus } from "../shared/types.ts";
 import { join } from "node:path";
+import { DEFAULT_NODE_ID, SCHEMA_SQL } from "../shared/schema.ts";
 
 /** Env-var name for the SQLite path (shared with lite). */
 export const VMHUB_DB_ENV = "VMHUB_DB";
@@ -69,51 +70,15 @@ export async function loadDbDriver(): Promise<DbCtor> {
 }
 
 /**
- * Schema DDL — must stay byte-identical to src/lite/db.ts SCHEMA so the reaper
- * can read a file lite wrote (and vice versa). Exported so tests bootstrap the
- * same tables.
+ * Schema DDL — shared with src/lite/db.ts via src/shared/schema.ts (the single
+ * source of truth). Exported here for tests that bootstrap the same tables.
  */
-export const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS vms (
-  uuid         TEXT PRIMARY KEY,
-  vmid         INTEGER NOT NULL UNIQUE,
-  templateId   TEXT NOT NULL,
-  adapter      TEXT NOT NULL,
-  capabilities TEXT NOT NULL,
-  proxmoxTag   TEXT NOT NULL,
-  namePrefix   TEXT NOT NULL,
-  status       TEXT NOT NULL,
-  sshPort      INTEGER,
-  ip           TEXT,
-  scratchDir   TEXT,
-  createdAt    INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS leases (
-  vmId          TEXT PRIMARY KEY,
-  owner         TEXT NOT NULL,
-  requestId     TEXT NOT NULL UNIQUE,
-  status        TEXT NOT NULL,
-  expiresAt     INTEGER NOT NULL,
-  lastRenewedAt INTEGER NOT NULL,
-  renewCount    INTEGER NOT NULL,
-  maxLifetimeMs INTEGER NOT NULL,
-  createdAt     INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS artifacts (
-  id        TEXT PRIMARY KEY,
-  leaseId   TEXT NOT NULL,
-  hostPath  TEXT NOT NULL,
-  sizeBytes INTEGER NOT NULL,
-  inFlight  INTEGER NOT NULL DEFAULT 0,
-  createdAt INTEGER NOT NULL
-);
-`;
+export { SCHEMA_SQL } from "../shared/schema.ts";
 
 interface VmRow {
   uuid: string;
   vmid: number;
+  nodeId: string;
   templateId: string;
   adapter: string;
   capabilities: string;
@@ -158,6 +123,7 @@ function parseVmRow(r: Record<string, unknown>): Vm {
   const row = r as unknown as VmRow;
   return {
     uuid: row.uuid,
+    nodeId: row.nodeId ?? DEFAULT_NODE_ID,
     templateId: row.templateId,
     adapter: row.adapter,
     capabilities: JSON.parse(row.capabilities) as Vm["capabilities"],
@@ -224,7 +190,7 @@ class SqliteReaperDb implements ReaperDb {
   listLeasesWithVm(): LeaseWithVm[] {
     const rows = this.#db
       .prepare(
-        `SELECT v.uuid, v.vmid, v.templateId, v.adapter, v.capabilities, v.proxmoxTag,
+        `SELECT v.uuid, v.vmid, v.nodeId, v.templateId, v.adapter, v.capabilities, v.proxmoxTag,
                 v.namePrefix, v.status, v.sshPort, v.ip, v.scratchDir, v.createdAt,
                 l.vmId, l.owner, l.requestId, l.status AS leaseStatus, l.expiresAt,
                 l.lastRenewedAt, l.renewCount, l.maxLifetimeMs

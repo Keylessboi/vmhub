@@ -18,6 +18,7 @@ let dbPath: string;
 function makeVm(uuid: string, vmid: number): Vm {
   return {
     uuid,
+    nodeId: 'dl360p',
     templateId: "windows-11-24h2",
     adapter: "windows",
     capabilities: ["screenshot"],

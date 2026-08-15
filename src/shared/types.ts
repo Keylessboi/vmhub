@@ -100,9 +100,63 @@ export type VmStatus =
   | "error"
   | "destroyed";
 
+// ---------------------------------------------------------------------------
+// Nodes (multi-node)
+// ---------------------------------------------------------------------------
+
+/** Liveness/health state of a Proxmox node as observed by the control plane. */
+export type NodeStatus = "online" | "offline" | "stuck" | "unknown";
+
+/**
+ * A Proxmox node in the fleet registry. Static shape (id, metadata) comes from
+ * config; live fields (status, diskFreePct, goldens) are PROBE results from the
+ * shared probe loop, never config. A node is a host that satisfies template
+ * constraints — templates route to nodes, agents never pin.
+ */
+export interface VmNode {
+  /** Stable node id used in Vm.nodeId / registry lookups. */
+  id: string;
+  /** Human-readable name (informational only). */
+  name?: string;
+  /** API base URL, resolved at sweep/request time (IPs change). */
+  baseUrl?: string;
+  /** Observed state — "online"/"offline" are probes; "stuck" = repeated auth failure. */
+  status: NodeStatus;
+  metadata: {
+    /** OS families this node can host (adapter os values). */
+    os: WindowingSystem[];
+    /** True when the host CPU exposes AVX2 (macOS Ventura+ requirement). */
+    avx2: boolean;
+    /** Whether the host supports nested virtualization. */
+    nestedVirt: boolean;
+    /** Total RAM MB (static config hint). */
+    ramMb: number;
+    /** Free disk percent — PROBED, never config. */
+    diskFreePct?: number;
+    /** Golden ids staged on this node's storage — PROBED via storage listing. */
+    goldens?: string[];
+  };
+}
+
+/** Template→node affinity constraints. Evaluated against node metadata at query time. */
+export interface TemplateConstraint {
+  /** Required host OS family. MAY differ from Template.os (ios runs inside macos). */
+  os?: WindowingSystem;
+  cpu?: { avx2?: boolean };
+  nestedVirt?: boolean;
+  /** Minimum free RAM the node must have (live-probed headroom). */
+  minRamMb?: number;
+  /** Minimum free disk percent (live-probed). */
+  minDiskFreePct?: number;
+  /** Version-paired runtime required on the node (e.g. ios-simctl@xcode-26). */
+  runtime?: string;
+}
+
 export interface Vm {
   /** vmhub-owned uuid. The ONLY stable identity; VMIDs are never trusted. */
   uuid: string;
+  /** The node this VM lives on. Sticky — never changes after creation. */
+  nodeId: string;
   /** Template this VM was cloned from. */
   templateId: string;
   /** Adapter id driving this VM. */
@@ -163,6 +217,7 @@ export type ErrorCode =
   | "CAPABILITY_UNAVAILABLE"
   | "QUOTA_EXCEEDED"
   | "HOST_CAPACITY"
+  | "NODE_UNAVAILABLE"
   | "DISK_FULL"
   | "BOOT_TIMEOUT"
   | "LOCK_CONTENTION"
@@ -201,6 +256,10 @@ export interface Template {
   vcpus: number;
   /** Whether template creation requires nested virt. */
   nestedVirt: boolean;
+  /** Template→node affinity constraints. Absent = any capable node. */
+  constraints?: TemplateConstraint[];
+  /** Parent template id for derived templates (ios derives from macos). */
+  derivedFrom?: string;
   /** Human-readable notes. */
   notes?: string;
 }
