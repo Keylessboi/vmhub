@@ -64,7 +64,44 @@ above. **Re-templated 2026-08-15** from the repaired diag clone (full clone via
 
 Template facts: VMID **2060**, name `x11-2404`, tags `gitops`, ip
 **10.10.10.63**, cpu `host`, **2 cores / 4GB**, scsi0
-`vmhub:base-2060-disk-0` (independent full clone).
+`vmhub:base-2060-disk-0` (independent full clone). The root disk must be
+**≥ 64GB** (issue #9); the rebuild recipe below grows it.
+
+### Rebuild / grow the root disk (issues #8 #9)
+
+The root disk requirement is **≥ 64GB**. The original golden cloned the base's
+~3G root and ran 99% full, so this recipe grows it in place before
+re-templating. On the ZFS-thin `vmhub` pool, a 64G virtual disk costs almost
+nothing until it is actually written, so there is no reason to build lean.
+
+Verified procedure (clone → resize → grow → gate → re-template):
+
+1. **Full-clone the golden to a builder VMID** and tag it `builder`, never
+   `gitops` (a `gitops` tag would put the builder under reconciler management):
+   ```
+   qm clone 2060 <vmid> --full 1 --name x11-2404-builder
+   qm set <vmid> --tags builder
+   ```
+2. **Grow the disk** (powered off): `qm resize <vmid> scsi0 64G`.
+3. **Boot the builder**, then inside it:
+   - `lsblk` to confirm the root partition is `/dev/sda1` (ext4 on GPT)
+   - `growpart /dev/sda 1 && resize2fs /dev/sda1` (if `growpart` is missing,
+     `apt-get install -y cloud-guest-utils` provides it)
+   - `df -h /` should show ≈63G usable
+4. **Gate the rebuilt golden** from the host:
+   `bash scripts/x11-golden-gate.sh <ip>` must pass 5/5 (see the gate section
+   below). Never re-template a builder that does not pass.
+5. **Stop, convert, swap into 2060**: `qm stop <vmid>`, `qm template <vmid>`,
+   then full-clone the grown template into production VMID 2060 keeping name
+   `x11-2404`, tags `gitops`, ip `10.10.10.63`. The reconciler (5-min timer)
+   re-asserts those values from `desired/vms.json`, so the swap must keep them
+   or the reconciler reports drift.
+
+**Follow-up (documented, not done):** the shared base debian-13-golden (2030)
+still carries its original ~3G root disk. All Linux goldens clone from it, so
+a future pass should grow the base disk the same way (resize → grow in a
+builder → re-template) and rebuild the Linux goldens from it, so the 64G root
+is inherited instead of grown per golden.
 
 ### The critical launcher/session fix (issue #3)
 
@@ -120,6 +157,12 @@ The fix has four parts:
   window list are non-empty (48-node tree, 3 windows verified).
 - gnome-screenshot 41.0 is the screenshot backend (works via X11 fallback;
   ImageMagick `import` is NOT installed and not needed).
+- `ffmpeg` + `xvfb` (added 2026-08-15, issue #8): the golden hosts
+  `computer-use-linux 0.4.9`, whose adapter capture path uses gnome-screenshot
+  and needs no ffmpeg (gate-verified 5/5 without it). The packages ship anyway
+  so fork-based workflows work on a leased clone too: Keylessboi/computer-use
+  captures via `ffmpeg -f x11grab`, and `xvfb` provides a virtual framebuffer
+  for headless X runs.
 
 ### Accessibility (openbox autostart)
 
