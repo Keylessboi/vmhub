@@ -205,6 +205,32 @@ describe("POST /v1/leases", () => {
     expect(json.error.retryable).toBe(false);
   });
 
+  test("adapter-name ids alias to the golden of that OS (issue #10 defense-in-depth)", async () => {
+    const c = makeCtx();
+    const h = handler(c);
+    // "hyprland" (adapter id) resolves to the hyprland golden by OS family.
+    const aliased = await createLease(h, "r-alias", "hyprland");
+    expect(aliased.status).toBe(201);
+    expect(aliased.json.vm.templateId).toBe("hyprland-2404");
+    // "x11" aliases to an OS family whose golden is unavailable → typed 409.
+    const x11 = await createLease(h, "r-alias-x11", "x11");
+    expect(x11.status).toBe(409);
+    expect(x11.json.error.code).toBe("CAPABILITY_UNAVAILABLE");
+  });
+
+  test("numeric ids and headless-mapping names never alias (issue #10 guards)", async () => {
+    const c = makeCtx();
+    const h = handler(c);
+    const numeric = await createLease(h, "r-num", "2060");
+    expect(numeric.status).toBe(404);
+    expect(numeric.json.error.code).toBe("NOT_FOUND");
+    // "headless" maps to the headless OS but no such golden exists → NOT_FOUND,
+    // proving the alias guard cannot silently clone the wrong template.
+    const headless = await createLease(h, "r-headless", "headless");
+    expect(headless.status).toBe(404);
+    expect(headless.json.error.code).toBe("NOT_FOUND");
+  });
+
   test("unavailable/stub templates → 409 CAPABILITY_UNAVAILABLE with reason", async () => {
     const c = makeCtx();
     const h = handler(c);

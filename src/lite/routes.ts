@@ -33,6 +33,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { ProxmoxClient } from "./proxmox.ts";
 import { isVmError } from "./proxmox.ts";
+import { osFromTemplateName } from "./proxmox-real.ts";
 import type { LeaseRow, LeaseStatus, LiteDb, VmRow } from "./db.ts";
 import type {
   ArtifactRecord,
@@ -252,7 +253,7 @@ function positiveMs(value: unknown): number | undefined {
 async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
   const body = (await readJson(req)) as LeaseCreateBody;
   const requestId = firstString(body.request_id, body.requestId, req.headers.get("x-request-id"));
-  const templateId = firstString(body.template_id, body.templateId);
+  let templateId = firstString(body.template_id, body.templateId);
   const owner = typeof body.owner === "string" ? body.owner : "unknown";
 
   if (!requestId) {
@@ -269,7 +270,15 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
   assertDiskSpace(ctx);
 
   const templates = await ctx.proxmox.listTemplates();
-  const tpl = templates.find((t) => t.id === templateId);
+  let tpl = templates.find((t) => t.id === templateId);
+  // Adapter-name alias (defense-in-depth): when the id is not a golden name
+  // or VMID, resolve an adapter/os-family name (e.g. "x11") to the golden of
+  // that OS. Numeric VMIDs and unknown names (osFromTemplateName → headless)
+  // never alias, so "9999"/"2060"/garbage stay NOT_FOUND.
+  if (!tpl && !/^\d+$/.test(templateId) && osFromTemplateName(templateId) !== "headless") {
+    tpl = templates.find((t) => t.os === osFromTemplateName(templateId));
+    if (tpl) templateId = tpl.id; // forward the resolved golden id, never the alias
+  }
   if (!tpl) throw notFound(`template '${templateId}' not found`);
   if (tpl.availability !== "available") throw unavailableTemplate(tpl);
 
