@@ -59,6 +59,12 @@ export interface RouterDeps {
   maxLifetimeMs?: number;
   now?: () => number;
   uuid?: () => string;
+  /**
+   * Optional desktop-readiness gate (issue #3). When present, createLease
+   * inserts the VM as 'starting', awaits this probe, and only then reports
+   * 'ready' (or 'error'). Absent → the old immediate-ready behavior.
+   */
+  desktopReady?: (vm: Vm) => Promise<boolean>;
 }
 
 export interface ResolvedDeps {
@@ -70,6 +76,7 @@ export interface ResolvedDeps {
   maxLifetimeMs: number;
   now: () => number;
   uuid: () => string;
+  desktopReady?: (vm: Vm) => Promise<boolean>;
 }
 
 export const DEFAULT_LEASE_DURATION_MS = 3_600_000; // 1h
@@ -86,6 +93,7 @@ function resolveDeps(deps: RouterDeps): ResolvedDeps {
     maxLifetimeMs: deps.maxLifetimeMs ?? DEFAULT_MAX_LIFETIME_MS,
     now: deps.now ?? (() => Date.now()),
     uuid: deps.uuid ?? (() => randomUUID()),
+    desktopReady: deps.desktopReady,
   };
 }
 
@@ -279,7 +287,7 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
     capabilities: tpl.capabilities,
     proxmoxTag: `vmhub-${prefix}-${uuid}`,
     namePrefix: prefix,
-    status: "ready",
+    status: ctx.desktopReady ? "starting" : "ready",
     createdAt: now,
   };
   const lease: LeaseRow = {
@@ -322,6 +330,31 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
     const winner = ctx.db.getLeaseByRequestId(requestId);
     if (winner) return json(toLeaseResponse(winner, ctx), 200);
     throw err;
+  }
+  if (ctx.desktopReady) {
+    // Readiness gate (issue #3): the VM is already persisted as 'starting';
+    // flip it to 'ready' (or 'error') ASYNCHRONOUSLY once the desktop is up.
+    // The create response returns immediately with status 'starting' so the
+    // MCP client (10s HTTP timeout) can never die on a cold-clone boot that
+    // takes up to the gate's 120s bound — agents poll vm_lease_status until
+    // the flip. The probe resolves a boolean and never rejects; the catch is
+    // defensive so a rejection also lands on 'error', never a stuck 'starting'.
+    void ctx.desktopReady(vm).then(
+      (ready) => {
+        try {
+          ctx.db.updateVmStatus(uuid, ready ? 'ready' : 'error');
+        } catch {
+          // DB write races a release — the lease teardown already won.
+        }
+      },
+      () => {
+        try {
+          ctx.db.updateVmStatus(uuid, 'error');
+        } catch {
+          // same as above
+        }
+      },
+    );
   }
   return json(toLeaseResponse(lease, ctx), 201);
 }
