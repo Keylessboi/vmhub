@@ -53,6 +53,16 @@ function handler(c: Ctx) {
   return createLiteHandler(c.ctx);
 }
 
+/** Poll until pred() holds (bun's vitest-compat has no vi.waitFor). */
+async function waitFor(pred: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pred()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+}
+
 async function call(
   h: ReturnType<typeof handler>,
   method: string,
@@ -231,6 +241,46 @@ describe("POST /v1/leases", () => {
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
       "INVALID_REQUEST",
     );
+  });
+});
+
+describe("lease readiness gate (issue #3)", () => {
+  // desktopReady is a new optional RouterDeps field (T4b); the casts fall
+  // away once the field exists.
+  test("with a desktopReady probe: create returns 'starting' fast, probe flip lands 'ready'", async () => {
+    let resolveProbe: (ok: boolean) => void = () => {};
+    const probe = () =>
+      new Promise<boolean>((res) => {
+        resolveProbe = res;
+      });
+    const c = makeCtx({ desktopReady: probe } as unknown as Partial<RouterDeps>);
+    const h = handler(c);
+    const pending = createLease(h, "r-start");
+
+    // The 201 must return WITHOUT waiting for the probe (the MCP client's
+    // HTTP timeout is 10s; a cold clone's gate can take 120s).
+    const { status, json } = await pending;
+    expect(status).toBe(201);
+    expect(json.vm.status).toBe("starting");
+
+    resolveProbe(true);
+    await waitFor(() => c.db.listVms()[0]?.status === "ready");
+    expect(c.db.listVms()[0]?.status).toBe("ready");
+  });
+
+  test("probe that never passes → VM flips to 'error' async", async () => {
+    const c = makeCtx({ desktopReady: () => Promise.resolve(false) } as unknown as Partial<RouterDeps>);
+    const { status, json } = await createLease(handler(c), "r-err");
+    expect(status).toBe(201);
+    expect(json.vm.status).toBe("starting");
+    await waitFor(() => c.db.listVms()[0]?.status === "error");
+    expect(c.db.listVms()[0]?.status).toBe("error");
+  });
+
+  test("without a desktopReady probe, leases stay immediate-ready (unchanged)", async () => {
+    const c = makeCtx();
+    const { json } = await createLease(handler(c), "r-imm");
+    expect(json.vm.status).toBe("ready");
   });
 });
 

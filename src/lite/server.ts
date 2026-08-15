@@ -16,6 +16,7 @@ import { LiteDb, resolveDbPath } from "./db.ts";
 import { MockProxmox, type ProxmoxClient } from "./proxmox.ts";
 import { RealProxmox } from "./proxmox-real.ts";
 import { createLiteHandler, type RouterDeps } from "./routes.ts";
+import { checkDesktopReady } from "./readiness.ts";
 
 export interface LiteServerConfig {
   port?: number;
@@ -40,6 +41,11 @@ export function startLiteServer(config: LiteServerConfig = {}): ReturnType<typeo
     db,
     proxmox,
     diskRefusalThresholdPct: readThresholdPct(),
+    // Readiness gate (issue #3): only x11 leases probe the desktop (openbox).
+    // Other adapters have no openbox (hyprland runs Hyprland, headless has no
+    // desktop, windows/android/macos/ios have no in-VM openbox) — gating them
+    // on an openbox probe would turn every healthy lease into 'error'.
+    desktopReady: (vm) => (vm.adapter === "x11" ? checkDesktopReady(vm) : Promise.resolve(true)),
     ...(config.deps ?? {}),
   });
 

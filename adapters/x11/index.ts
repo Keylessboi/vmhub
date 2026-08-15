@@ -16,8 +16,13 @@
  *   vm_list_windows→ list_windows    vm_key     → press_key
  *   vm_drag        → drag
  *   focus          → activate_window (dispatch)
- *   launch/close   → CAPABILITY_UNAVAILABLE (computer-use-linux has no such
- *                    tools — the catalog does not advertise them)
+ *   doctor         → doctor          (dispatch)
+ *   exec/launch    → /usr/local/bin/vmhub-exec over ssh (adapters/x11/exec.ts)
+ *   close          → wmctrl -ic/-c over the same ssh exec transport
+ *
+ * Exec, launch and close are NOT computer-use-linux tools; they run through
+ * the golden's in-VM vmhub-exec helper (which wraps commands in the autologin
+ * Xorg session env), so wmctrl and GUI launches reach the real desktop.
  *
  * Responses come back as structured content for Json<T> tools and as
  * {image, text-caption} for the screenshot tool; parse defensively so a
@@ -29,6 +34,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import type {
   CapabilityId,
   DesktopAdapter,
+  ExecResult,
   FileCapability,
   InputAction,
   InputCapability,
@@ -40,11 +46,27 @@ import type {
   WindowingSystem,
 } from '../../src/shared/types.ts';
 import { CAPABILITIES } from '../../src/shared/types.ts';
-import { vmError } from '../../src/mcp/errors.ts';
+import { makeVmError, vmError } from '../../src/mcp/errors.ts';
 import { vmSshMcpTransport } from '../transport.ts';
+import { execInVm, x11CloseArgs } from './exec.ts';
+export { vmhubExecArgs, x11CloseArgs } from './exec.ts';
 
 /** In-VM launcher path installed at golden build (runs computer-use-linux mcp). */
 export const IN_VM_LAUNCHER = '/usr/local/bin/launch-x11-mcp';
+
+/**
+ * Session env restored on the remote command line: the golden launcher's SSH
+ * context looks like "tty" (no XDG_SESSION_TYPE, no DISPLAY), which makes
+ * computer-use-linux skip the X11/EWMH window backend. Prefixing these lets
+ * the in-VM MCP server reach the autologin Xorg+openbox session.
+ */
+export const X11_SESSION_ENV: Record<string, string> = {
+  DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+  XAUTHORITY: '/home/vmuser/.Xauthority',
+  DISPLAY: ':0',
+  XDG_RUNTIME_DIR: '/run/user/1000',
+  XDG_SESSION_TYPE: 'x11',
+};
 
 /** Capability → computer-use-linux tool mapping (src/server.rs tool names). */
 export const X11_TOOL_MAP = {
@@ -90,8 +112,8 @@ export class X11Adapter implements DesktopAdapter {
     input: ['click', 'type', 'key', 'drag'] as InputCapability[],
     semantic: 'uia' as const,
     files: [] as FileCapability[],
-    exec: false,
-    notes: 'X11 desktop VM via computer-use-linux in-VM MCP (launch-x11-mcp).',
+    exec: true,
+    notes: 'X11 desktop VM via computer-use-linux in-VM MCP (launch-x11-mcp); exec via vmhub-exec over ssh.',
   };
 
   private conns = new Map<string, X11Connection>();
@@ -107,6 +129,9 @@ export class X11Adapter implements DesktopAdapter {
       CAPABILITIES.drag,
       CAPABILITIES.focus,
       CAPABILITIES.dispatch,
+      CAPABILITIES.exec,
+      CAPABILITIES.launch,
+      CAPABILITIES.close,
     ];
   }
 
@@ -116,10 +141,11 @@ export class X11Adapter implements DesktopAdapter {
     const existing = this.conns.get(key);
     if (existing) return existing;
 
-    // The golden launcher leaves XDG_SESSION_TYPE unset (its SSH context looks
-    // like "tty"), which makes computer-use-linux skip the X11/EWMH window
-    // backend. Restore it on the remote command line — no golden changes.
-    const transport = vmSshMcpTransport(vm, IN_VM_LAUNCHER, process.env, { XDG_SESSION_TYPE: 'x11' });
+    // The golden launcher leaves the X session vars unset (its SSH context
+    // looks like "tty"), which makes computer-use-linux skip the X11/EWMH
+    // window backend. Restore them on the remote command line — no golden
+    // changes. The transport composes `KEY=value ... launcher`.
+    const transport = vmSshMcpTransport(vm, IN_VM_LAUNCHER, process.env, X11_SESSION_ENV);
     const client = new Client({ name: 'vmhub-mcp-x11', version: '0.1.0' });
     try {
       await client.connect(transport);
@@ -223,6 +249,9 @@ export class X11Adapter implements DesktopAdapter {
       accessibility_tree?: AtspiNode[];
       accessibility_error?: string;
     };
+    if (typeof out.accessibility_error === 'string' && out.accessibility_error.length > 0) {
+      throw vmError('CAPABILITY_UNAVAILABLE', out.accessibility_error, 'Enable AT-SPI accessibility in the VM desktop session.');
+    }
     const width = out.screenshot?.coordinate_width ?? 0;
     const height = out.screenshot?.coordinate_height ?? 0;
     return {
@@ -236,16 +265,15 @@ export class X11Adapter implements DesktopAdapter {
       properties: {
         semantic: 'uia-atspi',
         adapter: 'x11',
-        ...(out.accessibility_error ? { accessibilityError: out.accessibility_error } : {}),
       },
     };
   }
 
-  async exec(_vm: Vm, _cmd: string, _args?: string[]): Promise<never> {
-    throw vmError('CAPABILITY_UNAVAILABLE', 'x11 adapter: no exec path (computer-use-linux has no exec tool)');
+  async exec(vm: Vm, cmd: string, args: string[] = []): Promise<ExecResult> {
+    return execInVm(vm, cmd, args);
   }
 
-  /** Validated escape hatch. focus maps to activate_window; the rest are honest gaps. */
+  /** Validated escape hatch. focus → activate_window, paste → type_text; the rest are honest gaps. */
   async dispatch(vm: Vm, verb: string, args: Record<string, unknown>): Promise<unknown> {
     switch (verb) {
       case 'focus': {
@@ -258,18 +286,23 @@ export class X11Adapter implements DesktopAdapter {
       case 'paste':
         // computer-use-linux has no clipboard tool; type_text is the closest.
         return (await this.call(vm, X11_TOOL_MAP.type, { text: String(args.text) })).result;
-      case 'launch':
-        throw vmError(
-          'CAPABILITY_UNAVAILABLE',
-          'x11 adapter: computer-use-linux has no launch tool',
-          'Open a terminal in the VM and type the command, or drive it over SSH.',
-        );
-      case 'close':
-        throw vmError(
-          'CAPABILITY_UNAVAILABLE',
-          'x11 adapter: computer-use-linux has no close tool',
-          'Close the window inside the VM (e.g. press_key with the close chord).',
-        );
+      case 'doctor': {
+        const res = await this.call(vm, 'doctor', {});
+        // The doctor tool wraps its payload in a nested `result` envelope.
+        return 'result' in res.result ? res.result.result : res.result;
+      }
+      case 'exec': {
+        const { cmd, args: cmdArgs = [] } = args as { cmd: string; args?: string[] };
+        return this.exec(vm, cmd, cmdArgs);
+      }
+      case 'launch': {
+        const { command, args: cmdArgs = [] } = args as { command: string; args?: string[] };
+        return this.exec(vm, command, cmdArgs);
+      }
+      case 'close': {
+        const window = String(args.window);
+        return this.exec(vm, 'wmctrl', x11CloseArgs(window));
+      }
       default:
         throw vmError('CAPABILITY_UNAVAILABLE', `x11 adapter: unknown dispatch verb "${verb}"`);
     }
@@ -285,9 +318,20 @@ export class X11Adapter implements DesktopAdapter {
       throw vmError('INTERNAL', `x11 tool "${name}" failed: ${text ?? 'unknown error'}`);
     }
     // Action-style tools report failure in `ok`; informational `error` fields
-    // (e.g. list_windows noting an empty desktop) are the caller's business.
+    // (e.g. list_windows noting an unreachable X server) are surfaced too —
+    // dropping them would turn a real failure into an empty successful result.
     if (payload && payload.ok === false) {
       throw mapX11ActionError(payload, name);
+    }
+    if (payload && payload.error !== undefined && payload.error !== null) {
+      const hint = typeof payload.permissions_hint === 'string' ? payload.permissions_hint : undefined;
+      const message = payloadErrorMessage(payload.error);
+      if (hint) {
+        // permissions_hint is free-form operator guidance; carry it as the
+        // VmError hint so agents can surface it verbatim.
+        throw makeVmError('CAPABILITY_UNAVAILABLE', message, { hint: hint as VmError['hint'] });
+      }
+      throw vmError('INTERNAL', message);
     }
     return { result: payload ?? {}, content: res.content };
   }
@@ -342,6 +386,16 @@ function mapX11ActionError(payload: Record<string, unknown>, tool: string): VmEr
     return vmError('NOT_FOUND', message, `x11 ${tool}: target not found`);
   }
   return vmError('INTERNAL', message, `x11 ${tool}: ok=false`);
+}
+
+/** Extract the human-readable message from a payload `error` field (string or {message}). */
+function payloadErrorMessage(error: unknown): string {
+  if (typeof error === 'string' && error.length > 0) return error;
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    const msg = (error as { message?: unknown }).message;
+    if (typeof msg === 'string' && msg.length > 0) return msg;
+  }
+  return 'x11 tool failed';
 }
 
 /** Nest the flat AT-SPI node list (parent_index links) into a semantic tree. */

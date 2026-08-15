@@ -52,7 +52,163 @@ Desktop → `ssh -T -o ProxyJump=root@192.168.1.220 root@<vm-ip>
 
 ## Still to build (ISOs downloaded)
 - windows-11-24h2: /tmp/win11.iso (5.1G) — CursorTouch v0.8.5 in-VM
-- x11 golden: computer-use-linux in-VM MCP
+
+## x11-2404 (VMID 2060) — X11 desktop golden (computer-use-linux)
+
+Debian **trixie (13)** desktop golden: Xorg + openbox autologin on tty1 as
+vmuser (no display manager, no GNOME Shell), **computer-use-linux v0.4.9** as
+the in-VM MCP server, driven over SSH ProxyJump through the Proxmox host by
+adapters/x11 (`adapters/x11/index.ts`). Built on the debian-13-golden base
+above. **Re-templated 2026-08-15** from the repaired diag clone (full clone via
+2602, see below) and now reconciler-managed (`desired/vms.json`).
+
+Template facts: VMID **2060**, name `x11-2404`, tags `gitops`, ip
+**10.10.10.63**, cpu `host`, **2 cores / 4GB**, scsi0
+`vmhub:base-2060-disk-0` (independent full clone).
+
+### The critical launcher/session fix (issue #3)
+
+The original golden leased but was undrivable: every session-bus feature died
+with permission errors. Two stacked bugs:
+
+1. The X session ran on a **private dbus bus**. `.bash_profile` ran
+   `eval "$(dbus-launch --sh-syntax)"`, which put the X session
+   (startx → xinit → openbox) on a random `/tmp/dbus-*` bus that no external
+   process could reach.
+2. The old launcher used `su -s /bin/bash vmuser -c "..."`, which
+   **preserves the root SSH shell's `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus`**
+   (su does not reset the environment). computer-use-linux, running as vmuser,
+   then connected to root's private bus and hit `Operation not permitted`/EPERM
+   on every session-bus call: no AT-SPI, no portals, and gnome-screenshot
+   failed with `failed to connect to session bus`.
+
+The fix has four parts:
+
+1. **`.bash_profile` no longer starts a private bus** (the dbus-launch line is
+   commented out with a rationale). The login shell already has
+   `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus` from pam_systemd, so
+   the X session now inherits the **stable systemd user bus**.
+2. **`/etc/vmhub-session.env`** (mode 0600, root:root) pins the session env:
+   ```
+   export DISPLAY=:0
+   export XAUTHORITY=/home/vmuser/.Xauthority
+   export XDG_RUNTIME_DIR=/run/user/1000
+   export XDG_SESSION_TYPE=x11
+   export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+   ```
+3. **`/usr/local/bin/launch-x11-mcp`** (mode 755) sources that env, then su's:
+   ```bash
+   #!/bin/bash
+   set -a
+   . /etc/vmhub-session.env
+   set +a
+   exec su -s /bin/bash vmuser -c "exec /usr/local/bin/computer-use-linux mcp"
+   ```
+4. **`/usr/local/bin/vmhub-exec`** (mode 755), the SSH exec/launch/close shim
+   that adapters/x11 uses for exec/launch/close, sources the same env before
+   running the command as vmuser, so `wmctrl` and GUI launches reach the real
+   desktop. (Verified end-to-end: exit 0; no-arg exit 2.)
+
+### Required packages
+
+- `libglib2.0-bin` (2.84.4) + `dconf-service`: provide `gsettings`/dconf.
+  The original golden shipped without them; that is why
+  `toolkit-accessibility` could never be set.
+- `wmctrl`, `xprop`, `xdotool`, `scrot`: already present; the X11/EWMH
+  backend (wmctrl) and XTEST input (xdotool) work without the session bus.
+- `xterm`, `lxpanel`, `zenity`: GTK apps autostarted so the AT-SPI tree and
+  window list are non-empty (48-node tree, 3 windows verified).
+- gnome-screenshot 41.0 is the screenshot backend (works via X11 fallback;
+  ImageMagick `import` is NOT installed and not needed).
+
+### Accessibility (openbox autostart)
+
+`/home/vmuser/.config/openbox/autostart` (mode 755, vmuser) enables AT-SPI and
+ensures a drivable desktop:
+
+```bash
+export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+export XDG_RUNTIME_DIR=/run/user/1000
+mkdir -p "$HOME/.config/dconf"     # dconf needs its db dir before gsettings persists
+gsettings set org.gnome.desktop.interface toolkit-accessibility true 2>/dev/null || true
+gsettings set org.gnome.desktop.interface enable-animations false 2>/dev/null || true
+xterm -T "agent-shell" &
+lxpanel &
+zenity --info --text="agent-shell" --title="agent-shell" &
+```
+
+**dconf gotcha:** gsettings silently fails to persist when `~/.config` is not
+vmuser-owned or `~/.config/dconf/` does not exist
+(`dconf-WARNING: failed to commit changes to dconf`). If the values stop
+sticking, fix ownership (`chown -R vmuser:vmuser /home/vmuser/.config`) and the
+dconf db dir.
+
+### Pinned born-current refresh
+
+`/usr/local/bin/vmhub-golden-refresh.sh` runs
+`npm install -g @agent-sh/computer-use-linux@0.4.9` (**PINNED**; an earlier
+unpinned `npm update -g` caused latent version drift), as oneshot systemd unit
+`vmhub-golden-refresh.service`, and touches `/var/lib/vmhub-golden-refreshed`.
+Clones run the born-current refresh at first boot. Keep the pin in sync with the
+adapter when upgrading.
+
+### The gate (acceptance bar before re-templating)
+
+`scripts/x11-golden-gate.sh <vm-ip>` runs in the exact launcher context
+(`set -a; . /etc/vmhub-session.env; set +a; su -s /bin/bash vmuser -c "..."`)
+and requires all 5 gates to pass:
+
+1. doctor all-ok: at_spi_bus, toolkit_accessibility, x11 backend and readiness
+   flags all true, 0 blockers
+2. gsettings persisted: `toolkit-accessibility` == true
+3. AT-SPI tree ≥ 3 nodes (48 verified: lxpanel, zenity)
+4. windows ≥ 1 (3 verified: xterm, panel, zenity)
+5. screenshot 3x deterministic: exit 0 each, 1920x1080, source gnome-screenshot
+
+Both the repaired golden (T5, VM 2600) and a fresh smoke clone of the
+re-templated 2060 (T6) passed with `OVERALL: PASS`. Run this gate on any
+rebuilt/repaired golden before re-templating it.
+
+### Critical learnings (all cost real time)
+
+1. **su preserves the DBUS env it was started with.** `su -s /bin/bash vmuser -c
+   "..."` from a root SSH shell keeps root's
+   `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus`. computer-use-linux then
+   runs as vmuser against root's private bus and every session-bus call fails
+   with `Operation not permitted`. The launcher MUST source
+   `/etc/vmhub-session.env` before the `su`.
+2. **Private dbus-launch bus vs the stable systemd user bus.** The original
+   golden's `.bash_profile` `eval "$(dbus-launch --sh-syntax)"` hijacked the X
+   session onto a random `/tmp/dbus-*` bus no external process could reach.
+   Removing it lets the session inherit the stable systemd user bus
+   `unix:path=/run/user/1000/bus` that pam_systemd already set for the login
+   shell.
+3. **Ready-vs-booted timing.** After power-on, SSH is reachable at +23s, Xorg
+   starts at +25s, openbox at +27s: a ~4s pre-desktop window where SSH works but
+   the desktop is not drivable. lite's lease readiness gate
+   (`src/lite/readiness.ts`) probes `pgrep -x openbox` over the same ProxyJump
+   SSH path, with a hard 120s bound (10s per-attempt timeout), so a lease flips
+   to `ready` only when the desktop is actually up.
+4. **dconf directory ownership.** gsettings silently fails to persist when
+   `~/.config` is not vmuser-owned or `~/.config/dconf/` is missing (see the
+   openbox autostart gotcha above).
+5. **Portals deferred (not required).** xdg-desktop-portal is not installed;
+   the doctor reports `org.freedesktop.portal.Desktop was not provided by any
+   .service files` for every portal check. That is fine: gnome-screenshot's X11
+   fallback and XTEST input cover the adapter's needs, so portals were
+   deliberately left out.
+
+### Verified transport (the full adapter path)
+
+Desktop → `ssh -T -o ProxyJump=root@192.168.1.220 root@<vm-ip>
+XDG_SESSION_TYPE=x11 /usr/local/bin/launch-x11-mcp` → MCP stdio server → live
+computer-use-linux. `tools/list` and `screenshot` verified working (1920x1080
+PNG delivered); the adapter composes the session env vars on the remote command
+line so the in-VM server reaches the autologin Xorg+openbox session.
+
+Lease-level verification (issue #3 acceptance): two full E2E journeys over the
+MCP surface, each `ready` in ~26s, with screenshot / inspect / list_windows /
+exec / launch / close all green (T7).
 
 ## android-9-golden (VMID 2200) — Android-x86 9.0-r2 desktop golden
 

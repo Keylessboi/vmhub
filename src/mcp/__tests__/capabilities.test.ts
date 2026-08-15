@@ -6,8 +6,11 @@
 import { describe, expect, it } from 'vitest';
 import { Registry } from '../../../adapters/index.ts';
 import { x11Adapter } from '../../../adapters/x11/index.ts';
+import { hyprlandAdapter } from '../../../adapters/hyprland/index.ts';
+import { headlessAdapter } from '../../../adapters/headless/index.ts';
 import { windowsAdapter } from '../../../adapters/windows/index.ts';
 import { iosAdapter } from '../../../adapters/ios/index.ts';
+import type { DesktopAdapter } from '../../../src/shared/types.ts';
 import {
   assertToolAvailable,
   capabilityReport,
@@ -82,4 +85,27 @@ describe('assertToolAvailable', () => {
       expect(e).toMatchObject({ code: 'CAPABILITY_UNAVAILABLE' });
     }
   });
+});
+
+describe('shared per-OS capability map mirrors adapter surfaces (drift guard, T4b)', () => {
+  // src/shared/os-capabilities.ts lands in T4b; the non-literal specifier
+  // keeps tsc green while these tests are red ("Cannot find module").
+  async function osCapabilities(os: string): Promise<string[]> {
+    const mod = await import('../../shared/os-capabilities.ts' + '');
+    return (mod as { osCapabilities(os: string): string[] }).osCapabilities(os);
+  }
+
+  const adapterCases: Array<[string, DesktopAdapter]> = [
+    ['x11', x11Adapter],
+    ['hyprland', hyprlandAdapter],
+    ['headless', headlessAdapter],
+    ['windows', windowsAdapter],
+  ];
+
+  for (const [os, adapter] of adapterCases) {
+    it(`osCapabilities('${os}') equals ${adapter.id}.availableTools()`, async () => {
+      const map = await osCapabilities(os);
+      expect([...map].sort()).toEqual([...adapter.availableTools()].sort());
+    });
+  }
 });

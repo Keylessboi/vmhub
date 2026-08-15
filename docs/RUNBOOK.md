@@ -5,7 +5,7 @@ can resume the vmhub build with zero loss. It captures every hard-won fact,
 every secret location (by name, never value), and the exact commands to
 continue. Read it top to bottom before touching anything.
 
-Last updated: 2026-08-13 (during Proxmox installer run)
+Last updated: 2026-08-15 (issue #3: x11 golden repaired and gate-verified)
 
 ---
 
@@ -241,7 +241,7 @@ cd ~/Projects/vmhub && doppler secrets --only-names --project proxmox --config p
 ## SESSION HANDOFF — 2026-08-14, resume 10:00
 
 ### Infrastructure (all live on 192.168.1.220)
-- Templates: 2030 debian-13-golden, 2060 x11-2404, 2070 hyprland-2404 (born-current), 2200 android-9-golden
+- Templates: 2030 debian-13-golden, 2060 x11-2404 (REPAIRED 2026-08-15, gate-verified), 2070 hyprland-2404 (born-current), 2200 android-9-golden; plus 2602 x11-2404-repaired (spare/rollback template, reconciler-ignored)
 - All Linux goldens open to users via vmhub-mcp (11 templates in vm_list_templates)
 - Networking verified: vmbr1 NAT 10.10.10.0/24, dnsmasq DHCP, static IP pool 10.10.10.50+ from lite, MASQUERADE, ip_forward=1
 - Secrets: Doppler proxmox/prd (PVE_HOST, PVE_TOKEN, PVE_ROOT_PW, PASSWORD, ILO_USERNAME). Repo is PUBLIC — never commit secrets.
@@ -273,3 +273,53 @@ cd ~/Projects/vmhub && doppler secrets --only-names --project proxmox --config p
 - "Legal activation at this step" placeholder in docs/golden-builds.md (operator step, nothing in repo)
 - hyprland golden was accidentally destroyed then rebuilt (2070) — recipe in docs/golden-builds.md
 - Wake timer: vmhub-wake.timer fires 10:00 daily (iLO power-on), wired into deploy/install.sh
+
+## SESSION HANDOFF — 2026-08-15, issue #3 closed (x11 golden drivable)
+
+### Issue #3 fix summary
+
+- x11-2404 (2060) was leasing but undrivable: no exec/launch/close, and
+  screenshot/inspect failed. Root cause was two stacked D-Bus bugs: the
+  desktop session ran on a private dbus-launch `/tmp/dbus-*` bus, and the
+  launcher's `su -s /bin/bash vmuser -c "..."` preserved root's
+  `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus`, so computer-use-linux
+  (running as vmuser) hit `Operation not permitted` on every session-bus call.
+- Fix (full recipe in docs/golden-builds.md, "x11-2404 (VMID 2060)" section):
+  dbus-launch removed from `.bash_profile` (the X session now runs on the
+  stable systemd user bus `/run/user/1000/bus`), `/etc/vmhub-session.env`
+  (mode 0600) sources the session env into launch-x11-mcp and vmhub-exec,
+  libglib2.0-bin + dconf-service installed, openbox autostart enables AT-SPI
+  and starts xterm + lxpanel + zenity, and the computer-use-linux install is
+  pinned at 0.4.9 (born-current refresh).
+- Gate: `scripts/x11-golden-gate.sh` passes 5/5 on the repaired clone and on a
+  fresh smoke clone (doctor all-ok, gsettings true, >=3 AT-SPI nodes, >=1
+  window, 3x deterministic 1920x1080 screenshots).
+- Re-templated: 2060 rebuilt 2026-08-15 as a full clone of the repaired golden
+  (via 2602); 2602 `x11-2404-repaired` kept as the spare/rollback template
+  (gitops tag stripped, reconciler-ignored). Reconciler clean (no drift).
+- E2E: two full lease journeys green end-to-end (ready ~26s, screenshot /
+  inspect / list_windows / exec / launch / close all pass; T7).
+- Catalog is now honest: 2060 x11 advertises exec/launch/close; hyprland
+  (2070) and windows (2100) advertise NO exec. Capabilities derive from each
+  adapter's `availableTools()`, so the catalog cannot drift.
+- Lease readiness gate: lite probes `pgrep -x openbox` over the same ProxyJump
+  SSH path (120s hard bound, 10s per-attempt timeout) and flips a lease to
+  `ready` only when the desktop is actually up. `vm_lease_create` returns
+  `starting` immediately; the gate runs in the background (poll
+  `vm_lease_status`).
+
+### Deploy-from-pin procedure (used for this fix)
+
+Bump the `control-plane/vmhub.pin` commit in the infra repo, push, then deploy
+from the infra repo:
+
+```bash
+doppler run --project proxmox --config prd -- sudo ./control-plane/deploy.sh
+```
+
+### Current golden status
+
+- 2060 x11-2404: template, stopped, REPAIRED and gate-verified 2026-08-15
+  (x11 is no longer "still to build")
+- 2602 x11-2404-repaired: spare / rollback template, stopped
+- 2030 debian-13-golden, 2070 hyprland-2404, 2100 windows-11-24h2: untouched
