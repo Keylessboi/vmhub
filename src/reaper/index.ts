@@ -209,12 +209,28 @@ export async function sweep(db: ReaperDb, proxmox: ProxmoxClient, opts: SweepOpt
     } catch (err) {
       report.errors.push({
         vmId: vm.uuid,
-        message: err instanceof Error ? err.message : String(err),
+        message: errorMessage(err),
       });
     }
   }
 
   return report;
+}
+
+/** Human-readable message from any thrown value (VmError objects, Errors, strings). */
+function errorMessage(err: unknown): string {
+  if (typeof err === 'string') return err;
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object' && err !== null) {
+    const msg = (err as { message?: unknown }).message;
+    if (typeof msg === 'string' && msg.length > 0) return msg;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return String(err);
+    }
+  }
+  return String(err);
 }
 
 export interface ReaperRuntimeOptions {
