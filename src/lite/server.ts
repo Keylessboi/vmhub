@@ -16,6 +16,13 @@ import { LiteDb, resolveDbPath } from "./db.ts";
 import { MockProxmox, type ProxmoxClient } from "./proxmox.ts";
 import { RealProxmox } from "./proxmox-real.ts";
 import { createLiteHandler, type RouterDeps } from "./routes.ts";
+import {
+  createNodeRegistry,
+  createProbeLoop,
+  resolveNodeConfigs,
+  type NodeProbe,
+  type NodeRegistry,
+} from "./nodes.ts";
 
 export interface LiteServerConfig {
   port?: number;
@@ -26,6 +33,9 @@ export interface LiteServerConfig {
   db?: LiteDb;
   /** Injected proxmox client (tests inject MockProxmox). */
   proxmox?: ProxmoxClient;
+  /** Injected multi-node registry + probe (tests fake these). */
+  nodes?: NodeRegistry;
+  probe?: NodeProbe;
   /** Extra router options (clock/uuid/disk injection for tests). */
   deps?: Partial<RouterDeps>;
 }
@@ -36,9 +46,13 @@ export function startLiteServer(config: LiteServerConfig = {}): ReturnType<typeo
 
   const db = config.db ?? new LiteDb(resolveDbPath(leaseDir));
   const proxmox = config.proxmox ?? createProxmoxClient();
+  const nodes = config.nodes ?? createNodeRegistry(resolveNodeConfigs());
+  const probe = config.probe ?? createProbeLoop(nodes);
   const handler = createLiteHandler({
     db,
     proxmox,
+    nodes,
+    probe,
     diskRefusalThresholdPct: readThresholdPct(),
     ...(config.deps ?? {}),
   });

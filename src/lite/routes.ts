@@ -34,13 +34,17 @@ import { randomUUID } from "node:crypto";
 import type { ProxmoxClient } from "./proxmox.ts";
 import { isVmError } from "./proxmox.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
+import type { NodeProbe, NodeRegistry, NodeProbeResult } from "./nodes.ts";
+import { byDiskThenId, nodeSatisfiesTemplate, PerNodeLock } from "./nodes.ts";
 import type { LeaseRow, LeaseStatus, LiteDb, VmRow } from "./db.ts";
 import type {
   ArtifactRecord,
   ErrorCode,
+  NodeStatus,
   Template,
   Vm,
   VmError,
+  VmNode,
 } from "../shared/types.ts";
 
 // ---------------------------------------------------------------------------
@@ -50,6 +54,11 @@ import type {
 export interface RouterDeps {
   db: LiteDb;
   proxmox: ProxmoxClient;
+  /** Multi-node registry + probe — when both are provided, leases route to a satisfying node. */
+  nodes?: NodeRegistry;
+  probe?: NodeProbe;
+  /** Minimum free-disk percent a node must have to host a lease (multi-node). */
+  nodeDiskFloorPct?: number;
   /** Free disk percentage (0-100) as reported for the allocation dir. */
   diskFreePct?: () => number;
   /** Allocation is refused when free space is below this percent. */
@@ -65,6 +74,10 @@ export interface RouterDeps {
 export interface ResolvedDeps {
   db: LiteDb;
   proxmox: ProxmoxClient;
+  nodes?: NodeRegistry;
+  probe?: NodeProbe;
+  nodeDiskFloorPct: number;
+  nodeLock: PerNodeLock;
   diskFreePct: () => number;
   diskRefusalThresholdPct: number;
   leaseDurationMs: number;
@@ -76,11 +89,16 @@ export interface ResolvedDeps {
 export const DEFAULT_LEASE_DURATION_MS = 3_600_000; // 1h
 export const DEFAULT_MAX_LIFETIME_MS = 86_400_000; // 24h
 export const DEFAULT_DISK_THRESHOLD_PCT = 15;
+export const DEFAULT_NODE_DISK_FLOOR_PCT = 15;
 
 function resolveDeps(deps: RouterDeps): ResolvedDeps {
   return {
     db: deps.db,
     proxmox: deps.proxmox,
+    nodes: deps.nodes,
+    probe: deps.probe,
+    nodeDiskFloorPct: deps.nodeDiskFloorPct ?? DEFAULT_NODE_DISK_FLOOR_PCT,
+    nodeLock: new PerNodeLock(),
     diskFreePct: deps.diskFreePct ?? defaultDiskFreePct,
     diskRefusalThresholdPct: deps.diskRefusalThresholdPct ?? DEFAULT_DISK_THRESHOLD_PCT,
     leaseDurationMs: deps.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS,
@@ -267,11 +285,20 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
   if (!tpl) throw notFound(`template '${templateId}' not found`);
   if (tpl.availability !== "available") throw unavailableTemplate(tpl);
 
+  const requestedTtl = positiveMs(body.ttl_ms) ?? positiveMs(body.ttlMs);
+  const initialTtl = Math.min(requestedTtl ?? ctx.leaseDurationMs, ctx.maxLifetimeMs);
+
+  // Multi-node routing: when a registry + probe are wired, select a node that
+  // satisfies the template's constraints + golden + RAM/disk headroom, then
+  // create the VM through that node's client. Single-node mode (no registry)
+  // keeps the legacy path byte-identical.
+  if (ctx.nodes && ctx.probe) {
+    return createRoutedLease(req, ctx, templates, tpl, requestId, owner, initialTtl);
+  }
+
   const now = ctx.now();
   const uuid = ctx.uuid();
   const prefix = prefixFromTemplateId(templateId);
-  const requestedTtl = positiveMs(body.ttl_ms) ?? positiveMs(body.ttlMs);
-  const initialTtl = Math.min(requestedTtl ?? ctx.leaseDurationMs, ctx.maxLifetimeMs);
 
   const vm: VmRow = {
     uuid,
@@ -329,6 +356,189 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
   return json(toLeaseResponse(lease, ctx), 201);
 }
 
+// ---------------------------------------------------------------------------
+// Multi-node lease routing
+// ---------------------------------------------------------------------------
+
+function nodeUnavailable(message: string, detail?: string): VmError {
+  return { code: "NODE_UNAVAILABLE", message, retryable: true, hint: "wait-then-retry", detail };
+}
+
+function noNodeAvailable(results: NodeProbeResult[], tpl: Template, floorPct: number): VmError {
+  const online = results.filter((r) => r.node.status === "online");
+  if (online.length === 0) {
+    return nodeUnavailable(
+      `no node is reachable for template '${tpl.id}'`,
+      "all registered nodes are offline or stuck; retry after the node probe recovers",
+    );
+  }
+  const reasons = online
+    .filter((r) => !nodeSatisfiesTemplate(r, tpl, floorPct))
+    .map((r) => `${r.node.id}: no golden/constraint/headroom match`)
+    .join("; ");
+  return nodeUnavailable(
+    `no node can host template '${tpl.id}'`,
+    reasons || "candidate nodes exist but none satisfy the template constraints",
+  );
+}
+
+/**
+ * Route a lease to a satisfying node (5-term availability: reachable ∧
+ * constraints ∧ golden present ∧ RAM headroom ≥ ramMb ∧ disk free ≥ floor).
+ * The per-node mutex serializes ONLY the allocation critical section
+ * (re-probe → headroom check → VMID/IP allocation → submit clone → release);
+ * startVm + readiness run OUTSIDE the lock. Sticky nodeId is written to the
+ * VmRow before insert — a lease never migrates.
+ */
+async function createRoutedLease(
+  req: Request,
+  ctx: ResolvedDeps,
+  templates: Template[],
+  tpl: Template,
+  requestId: string,
+  owner: string,
+  initialTtl: number,
+): Promise<Response> {
+  const now = ctx.now();
+  const uuid = ctx.uuid();
+  const prefix = prefixFromTemplateId(tpl.id);
+  const ramByTemplate = new Map(templates.map((t) => [t.id, t.ramMb] as const));
+  const usedRamOn = (nodeId: string): number =>
+    ctx.db.listVms().reduce((acc, vm) => (vm.nodeId === nodeId ? acc + (ramByTemplate.get(vm.templateId) ?? 0) : acc), 0);
+
+  const results = await ctx.probe!.results();
+  const candidates = results
+    .filter((r) => nodeSatisfiesTemplate(r, tpl, ctx.nodeDiskFloorPct) && r.ramHeadroomMb - usedRamOn(r.node.id) >= tpl.ramMb)
+    .sort(byDiskThenId);
+  if (candidates.length === 0) throw noNodeAvailable(results, tpl, ctx.nodeDiskFloorPct);
+
+  const chosen = candidates[0]!;
+  const nodeId = chosen.node.id;
+  const client = ctx.nodes!.client(nodeId);
+  if (!client) throw nodeUnavailable(`node '${nodeId}' has no client`);
+
+  const pvm = await ctx.nodeLock.run(nodeId, async () => {
+    // TOCTOU: re-probe the chosen node inside the mutex, right before create.
+    const fresh = await ctx.probe!.refresh(nodeId);
+    if (fresh && fresh.node.status === "online" && nodeSatisfiesTemplate(fresh, tpl, ctx.nodeDiskFloorPct)) {
+      return client.createVm({
+        templateId: tpl.id,
+        name: `${prefix}-${uuid.slice(0, 8)}`,
+        proxmoxTag: `vmhub-${prefix}-${uuid}`,
+        nodeId,
+        cpus: tpl.vcpus,
+        memoryMb: tpl.ramMb,
+      });
+    }
+    throw nodeUnavailable(
+      `node '${nodeId}' became unavailable during routing`,
+      "the node failed its re-probe; retry the lease",
+    );
+  });
+
+  const vm: VmRow = {
+    uuid,
+    vmid: pvm.vmid,
+    nodeId,
+    templateId: tpl.id,
+    adapter: tpl.os,
+    capabilities: tpl.capabilities,
+    proxmoxTag: `vmhub-${prefix}-${uuid}`,
+    namePrefix: prefix,
+    status: "ready",
+    ip: pvm.ip,
+    createdAt: now,
+  };
+  const lease: LeaseRow = {
+    vmId: uuid,
+    owner,
+    requestId,
+    status: "active",
+    expiresAt: now + initialTtl,
+    lastRenewedAt: now,
+    renewCount: 0,
+    maxLifetimeMs: ctx.maxLifetimeMs,
+    createdAt: now,
+  };
+
+  // startVm runs OUTSIDE the mutex (it is not the allocation critical section).
+  try {
+    await client.startVm(pvm.vmid);
+  } catch (err) {
+    await client.destroyVm(pvm.vmid);
+    throw err;
+  }
+  ctx.db.insertVm(vm);
+  try {
+    ctx.db.insertLease(lease);
+  } catch (err) {
+    ctx.db.deleteVm(uuid);
+    await client.destroyVm(pvm.vmid);
+    const winner = ctx.db.getLeaseByRequestId(requestId);
+    if (winner) return json(toLeaseResponse(winner, ctx), 200);
+    throw err;
+  }
+  return json(toLeaseResponse(lease, ctx), 201);
+}
+
+/** GET /v1/nodes — observed node state from the shared probe loop. */
+async function listNodes(req: Request, ctx: ResolvedDeps): Promise<Response> {
+  if (!ctx.probe) {
+    // Single-node fallback: synthesize one node from the existing client.
+    const node: VmNode = {
+      id: DEFAULT_NODE_ID,
+      name: DEFAULT_NODE_ID,
+      status: "online",
+      metadata: { os: [], avx2: false, nestedVirt: false, ramMb: 0 },
+    };
+    return json([node]);
+  }
+  const nodes = await ctx.probe.snapshot();
+  return json(nodes);
+}
+
+/**
+ * DELETE /v1/leases/{id}/force — closes the "defer forever" loop. Only allowed
+ * when the lease's node is in 'stuck' (repeated auth failure). Identity-verified:
+ * the Proxmox VM's tag must match the lease's tag before any destruction.
+ * Requires an explicit {"confirm":"destroy"} body.
+ */
+async function forceDestroyLease(req: Request, ctx: ResolvedDeps, id: string): Promise<Response> {
+  const lease = ctx.db.getLease(id);
+  if (!lease) throw notFound(`lease '${id}' not found`);
+  if (lease.status !== "active") {
+    return json({ vmId: id, status: lease.status });
+  }
+
+  const body = (await readJson(req)) as { confirm?: unknown };
+  if (body.confirm !== "destroy") {
+    throw invalidRequest("force-destroy requires an explicit body {\"confirm\":\"destroy\"}");
+  }
+
+  const vm = ctx.db.getVm(lease.vmId);
+  if (!vm) throw notFound(`vm '${lease.vmId}' not found`);
+
+  const nodeState = ctx.probe ? await ctx.probe.snapshot() : [];
+  const node = nodeState.find((n) => n.id === vm.nodeId);
+  if (!node || node.status !== "stuck") {
+    throw invalidRequest(`lease '${id}' node '${vm.nodeId}' is not stuck — use DELETE /v1/leases/${id} instead`);
+  }
+
+  const client = ctx.nodes?.client(vm.nodeId) ?? ctx.proxmox;
+  // Identity-verified: the Proxmox VM's tag must match the lease's tag.
+  const remote = await client.getVm(vm.vmid);
+  if (remote.proxmoxTag !== vm.proxmoxTag) {
+    throw invalidRequest(
+      `proxmox VM ${vm.vmid} on '${vm.nodeId}' carries tag '${remote.proxmoxTag}', not '${vm.proxmoxTag}'`,
+    );
+  }
+  await client.destroyVm(vm.vmid);
+  ctx.db.deleteArtifactsForLease(lease.vmId);
+  ctx.db.deleteVm(lease.vmId);
+  ctx.db.markLeaseReleased(lease.vmId, ctx.now());
+  return json({ vmId: id, status: "released", forced: true });
+}
+
 function getLease(req: Request, ctx: ResolvedDeps, id: string): Response {
   const lease = ctx.db.getLease(id);
   if (!lease) throw notFound(`lease '${id}' not found`);
@@ -372,7 +582,10 @@ async function releaseLease(req: Request, ctx: ResolvedDeps, id: string): Promis
 
   const vm = ctx.db.getVm(lease.vmId);
   if (vm) {
-    await ctx.proxmox.destroyVm(vm.vmid);
+    // Multi-node: destroy through the node's own client; single-node falls
+    // back to the shared client.
+    const client = ctx.nodes?.client(vm.nodeId) ?? ctx.proxmox;
+    await client.destroyVm(vm.vmid);
   }
   ctx.db.deleteArtifactsForLease(lease.vmId);
   ctx.db.deleteVm(lease.vmId);
@@ -462,7 +675,9 @@ const ROUTES: Route[] = [
   { method: "GET", segments: ["v1", "leases", ":id"], handler: getLease },
   { method: "POST", segments: ["v1", "leases", ":id", "renew"], handler: renewLease },
   { method: "DELETE", segments: ["v1", "leases", ":id"], handler: releaseLease },
+  { method: "DELETE", segments: ["v1", "leases", ":id", "force"], handler: forceDestroyLease },
   { method: "GET", segments: ["v1", "templates"], handler: listTemplates },
+  { method: "GET", segments: ["v1", "nodes"], handler: listNodes },
   { method: "GET", segments: ["v1", "vms"], handler: listVms },
   { method: "GET", segments: ["v1", "vms", ":id"], handler: getVm },
   { method: "POST", segments: ["v1", "artifacts"], handler: createArtifact },

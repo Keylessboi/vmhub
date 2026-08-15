@@ -9,6 +9,8 @@ import { describe, expect, test } from "vitest";
 import { LiteDb } from "./db.ts";
 import { MockProxmox } from "./proxmox.ts";
 import { createLiteHandler, type RouterDeps } from "./routes.ts";
+import { createNodeRegistry, type NodeProbe, type NodeProbeResult } from "./nodes.ts";
+import type { NodeConfig, NodeStatus, VmNode } from "../shared/types.ts";
 
 const T = {
   hyprland: "hyprland-2404",
@@ -502,5 +504,195 @@ describe("router hygiene", () => {
     const h = handler(c);
     const res = await h(new Request("http://localhost/v1/templates/", { method: "GET" }));
     expect(res.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-node routing
+// ---------------------------------------------------------------------------
+
+interface FakeNode {
+  config: NodeConfig;
+  client: MockProxmox;
+  node: VmNode;
+  ramHeadroomMb: number;
+}
+
+/** Build a node with a live MockProxmox client behind a static NodeConfig. */
+function fakeNode(id: string, overrides: Partial<VmNode["metadata"]> = {}, ramHeadroomMb = 8192): FakeNode {
+  const config: NodeConfig = {
+    id,
+    baseUrl: `https://${id}.local:8006`,
+    tokenEnv: `VMHUB_NODE_${id.toUpperCase()}_TOKEN`,
+    metadata: { os: ["hyprland", "windows"], avx2: true, nestedVirt: true, ramMb: 8192 },
+  };
+  const client = new MockProxmox(id);
+  const node: VmNode = {
+    id,
+    name: id,
+    status: "online",
+    metadata: {
+      os: ["hyprland", "windows"],
+      avx2: true,
+      nestedVirt: true,
+      ramMb: 8192,
+      diskFreePct: 80,
+      goldens: ["hyprland-2404", "windows-11-24h2"],
+      ...overrides,
+    },
+  };
+  return { config, client, node, ramHeadroomMb };
+}
+
+class FakeProbe implements NodeProbe {
+  constructor(private nodes: FakeNode[]) {}
+
+  async snapshot(): Promise<VmNode[]> {
+    return this.nodes.map((n) => n.node);
+  }
+
+  async results(): Promise<NodeProbeResult[]> {
+    return this.nodes.map((n) => ({
+      node: n.node,
+      ramHeadroomMb: n.ramHeadroomMb,
+      diskFreeBytes: 0,
+      diskUsedBytes: 0,
+    }));
+  }
+
+  async refresh(nodeId: string): Promise<NodeProbeResult | undefined> {
+    const n = this.nodes.find((x) => x.config.id === nodeId);
+    if (!n) return undefined;
+    return { node: n.node, ramHeadroomMb: n.ramHeadroomMb, diskFreeBytes: 0, diskUsedBytes: 0 };
+  }
+
+  setStatus(nodeId: string, status: NodeStatus): void {
+    const n = this.nodes.find((x) => x.config.id === nodeId);
+    if (n) n.node = { ...n.node, status };
+  }
+}
+
+function makeMultiNodeCtx(nodes: FakeNode[]): { ctx: RouterDeps; db: LiteDb } {
+  const db = new LiteDb(":memory:");
+  const registry = createNodeRegistry(
+    nodes.map((n) => n.config),
+    (cfg) => nodes.find((n) => n.config.id === cfg.id)!.client,
+  );
+  const ctx: RouterDeps = {
+    db,
+    proxmox: new MockProxmox("dl360p"),
+    nodes: registry,
+    probe: new FakeProbe(nodes),
+    now: () => 1_000_000,
+    uuid: (() => {
+      let n = 0;
+      return () => `uuid-${++n}`;
+    })(),
+    diskFreePct: () => 100,
+    diskRefusalThresholdPct: 15,
+    leaseDurationMs: 3_600_000,
+    maxLifetimeMs: 86_400_000,
+  };
+  return { ctx, db };
+}
+
+describe("multi-node lease routing", () => {
+  test("routes the lease to the node satisfying constraints (both online)", async () => {
+    const nodes = [fakeNode("nodeA"), fakeNode("nodeB")];
+    const { ctx } = makeMultiNodeCtx(nodes);
+    const h = createLiteHandler(ctx);
+    const { status, json } = await createLease(h, "r1");
+    expect(status).toBe(201);
+    expect(json.vm.nodeId).toBe("nodeA"); // tie broken by nodeId asc
+    const nodeA = nodes.find((n) => n.config.id === "nodeA")!;
+    expect((await nodeA.client.listVms())[0]).toMatchObject({
+      proxmoxTag: "vmhub-hyprland-uuid-1",
+      nodeId: "nodeA",
+    });
+  });
+
+  test("skips a node that lacks the template's golden", async () => {
+    const nodes = [
+      fakeNode("nodeA"),
+      fakeNode("nodeB", { goldens: ["windows-11-24h2"] }), // no hyprland golden
+    ];
+    const { ctx } = makeMultiNodeCtx(nodes);
+    const { status, json } = await createLease(createLiteHandler(ctx), "r1");
+    expect(status).toBe(201);
+    expect(json.vm.nodeId).toBe("nodeA");
+  });
+
+  test("node with 0 RAM headroom → template unavailable, typed retryable", async () => {
+    const nodes = [fakeNode("nodeA", {}, 0)];
+    const { ctx } = makeMultiNodeCtx(nodes);
+    const { status, json } = await createLease(createLiteHandler(ctx), "r1");
+    expect(status).toBe(503);
+    expect(json.error).toMatchObject({
+      code: "NODE_UNAVAILABLE",
+      retryable: true,
+      hint: "wait-then-retry",
+    });
+    expect(json.error.detail).toContain("node");
+  });
+
+  test("all nodes unreachable → NODE_UNAVAILABLE retryable", async () => {
+    const nodes = [fakeNode("nodeA"), fakeNode("nodeB")];
+    const { ctx } = makeMultiNodeCtx(nodes);
+    const probe = ctx.probe as FakeProbe;
+    probe.setStatus("nodeA", "offline");
+    probe.setStatus("nodeB", "stuck");
+    const { status, json } = await createLease(createLiteHandler(ctx), "r1");
+    expect(status).toBe(503);
+    expect(json.error.code).toBe("NODE_UNAVAILABLE");
+    expect(json.error.retryable).toBe(true);
+  });
+
+  test("TOCTOU: node dies between catalog read and create → typed retryable, no VM leaked", async () => {
+    const nodes = [fakeNode("nodeA")];
+    const { ctx } = makeMultiNodeCtx(nodes);
+    const probe = ctx.probe as FakeProbe;
+    // The catalog read passes, then the node flips offline before create.
+    probe.setStatus("nodeA", "offline");
+    const { status, json } = await createLease(createLiteHandler(ctx), "r1");
+    expect(status).toBe(503);
+    expect(json.error.code).toBe("NODE_UNAVAILABLE");
+    const nodeA = nodes.find((n) => n.config.id === "nodeA")!;
+    expect(await nodeA.client.listVms()).toHaveLength(0);
+  });
+
+  test("GET /v1/nodes returns observed node state", async () => {
+    const nodes = [fakeNode("nodeA"), fakeNode("nodeB")];
+    const { ctx } = makeMultiNodeCtx(nodes);
+    const { status, json } = await call(createLiteHandler(ctx), "GET", "/v1/nodes");
+    expect(status).toBe(200);
+    expect(Array.isArray(json)).toBe(true);
+    expect(json.map((n: VmNode) => n.id)).toEqual(["nodeA", "nodeB"]);
+    expect(json[0].status).toBe("online");
+  });
+
+  test("force-destroy requires a stuck node + explicit confirmation", async () => {
+    const nodes = [fakeNode("nodeA")];
+    const { ctx, db } = makeMultiNodeCtx(nodes);
+    const h = createLiteHandler(ctx);
+    const created = await createLease(h, "r1");
+    const vmId = created.json.lease.vmId;
+
+    // Node online → force-destroy refused.
+    const notStuck = await call(h, "DELETE", `/v1/leases/${vmId}/force`, { confirm: "destroy" });
+    expect(notStuck.status).toBe(400);
+
+    // Missing confirmation → refused even when stuck.
+    const probe = ctx.probe as FakeProbe;
+    probe.setStatus("nodeA", "stuck");
+    const noConfirm = await call(h, "DELETE", `/v1/leases/${vmId}/force`, {});
+    expect(noConfirm.status).toBe(400);
+
+    // Confirmed + stuck → lease released, VM destroyed.
+    const forced = await call(h, "DELETE", `/v1/leases/${vmId}/force`, { confirm: "destroy" });
+    expect(forced.status).toBe(200);
+    expect(forced.json).toMatchObject({ vmId, status: "released", forced: true });
+    expect(db.getLease(vmId)?.status).toBe("released");
+    const nodeA = nodes.find((n) => n.config.id === "nodeA")!;
+    expect(await nodeA.client.listVms()).toHaveLength(0);
   });
 });
