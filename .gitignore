@@ -39,3 +39,10 @@ artifacts/
 # Finder (MacOS) folder config
 .DS_Store
 *.iso
+
+# macOS probe / golden artifacts (DMCA-clean repo — never commit Apple binaries)
+BaseSystem*.dmg
+BaseSystem*.img
+*.xip
+*.qcow2
+mac_hdd_ng.img

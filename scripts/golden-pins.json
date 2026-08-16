@@ -1,0 +1,13 @@
+{
+  "primary": "sequoia-15.7.9",
+  "fallback": "sonoma-14.5",
+  "macosBuild": "24G830",
+  "xcodeBuild": "26.3",
+  "iosRuntime": "26.3.1",
+  "iosRuntimeBuild": "23D8133",
+  "cpuModel": "host,kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on",
+  "qemuVersion": "8.2.5",
+  "qemuMachine": "pc-q35-4.2",
+  "hostUser": "vmhub",
+  "notes": "CPU model deviation: frozen Skylake-Client,-hle,-rtm hangs the macOS kernel at handoff on this QEMU 8.2.5 host; -cpu host is required. macOS installed is 15.7.9 (recovery served 15.4.1, installer fetched latest Sequoia). Xcode 26.3 installed from staged local artifact (sha1 cebf05ec2920111830af5e08a45f07961e36bfd6), no Apple ID."
+}
