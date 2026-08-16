@@ -215,3 +215,158 @@ as unavailable until `qm template 2100` runs.
 7. **Convert to golden template** (after activation). The adapter
    (adapters/windows/index.ts) is wired for streamable-http + Bearer auth;
    set `CURSORTOUCH_AUTH_KEY` via Doppler/env.
+
+## macos-sequoia-15.7.9-1 (VMID 2120) — golden factory attempt (Track D, 2026-08-16)
+
+Status: **BLOCKED at the boot gate — NOT a template yet.** The guest disk is
+intact and contains the fully-installed macOS (15.7.9 / 24G830, Xcode 26.3,
+iOS 26.3.1 runtime, idb) from the T4 probe. The probe's proven QEMU recipe
+(8.2.5 + `pc-q35-4.2` + `-cpu host,kvm=on,vendor=GenuineIntel,+invtsc,
+vmware-cpuid-freq=on`) is the ONLY environment this macOS boots under, and it
+is not reproducible on this host right now. Full evidence below.
+
+### VMID map (Vostro, `pve` node)
+
+| VMID | Name | State | Notes |
+|---|---|---|---|
+| 2120 | macos-sequoia-15.7.9-1 | stopped, plain VM (NOT template) | adopted probe disk + OpenCore + OVMF/efidisk, 8 GiB / 4 cores |
+| — | disk `local-lvm:vm-2120-disk-0` | 100 GiB thin LV | the T4 probe macOS disk, adopted (renamed from `probe-macos`) |
+| — | disk `local-lvm:vm-2120-disk-3` | 64 MiB | OpenCore ESP, rebuilt from pristine sources |
+| 101 | VM 101 | running (restored after temporary stop for RAM headroom) | — |
+| 102 | emphatic | stopped (evicted — do NOT start) | — |
+
+Golden id `macos-sequoia-15.7.9-1` and the frozen triple stay as pinned in
+`scripts/golden-pins.json` (source of truth). Deterministic guest MAC:
+`52:54:00:c9:18:27` (vmxnet3, recorded from the probe recipe and set on
+net0).
+
+### What IS baked into the guest (persists on the disk LV)
+
+All applied over the live SSH channel (host port 2222) before the boot
+regression, per the blinddriver doctrine (SSH text only, never pixels):
+
+- **mac-control-mcp v0.8.1** installed at
+  `/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP` (universal
+  binary from AdelElo13/mac-control-mcp releases) and **re-signed** with
+  `codesign -f -s - -i com.vmhub.agent -r '=designated => identifier
+  "com.vmhub.agent"'` so its TCC identity is the stable `com.vmhub.agent`.
+- **vmhub-axprobe** at `/usr/local/bin/vmhub-axprobe` (Swift TCC probe,
+  source committed at `scripts/macos/vmhub-axprobe.swift`; subcommands
+  `ax` / `screencap <png>`), signed with the same `com.vmhub.agent`
+  designated requirement. Its designated requirement verified:
+  `designated => identifier "com.vmhub.agent"`.
+- **Update freeze**: `softwareupdate --schedule off` is a no-op on this
+  guest (daemon entitlement error — see deviations); the durable plist keys
+  ARE set and persist in
+  `/Library/Preferences/com.apple.SoftwareUpdate.plist`:
+  `AutomaticDownload=0`, `AutomaticallyInstallMacOSUpdates=0`,
+  `ConfigDataInstall=0`, `CriticalUpdateInstall=0`.
+- **Power**: `pmset sleep 0 displaysleep 0 disablesleep 1` (persisted).
+- **Auto-login**: verified already working (`autoLoginUser=vmhub`,
+  `autoLoginUserLoggedIn=true`, `/etc/kcpassword` present, `who` shows a
+  `console` session) — left untouched.
+- **sshd**: `com.openssh.sshd => enabled` via launchctl, survives reboot
+  (verified through the reboot performed during the bake).
+- **Deterministic MAC** recorded: `52:54:00:c9:18:27`.
+
+### NOT baked (blocked) — recorded per plan
+
+- **TCC pre-grants (Accessibility / Screen Recording / AppleEvents): NOT
+  applied.** The regrant script
+  (`scripts/macos/vmhub-regrant-tcc.sh`, installed to
+  `/usr/local/bin/vmhub-regrant-tcc.sh`) and the signed agent binary are
+  ready; the grant insert requires SIP-rootless access to the user TCC db,
+  which macOS blocks while SIP is on ("authorization denied" / "Operation
+  not permitted" even as root). The plan is: set OpenCore NVRAM
+  `csr-active-config=0x77` (SIP off), apply grants, restore SIP. The guest
+  became unbootable before this could be executed.
+- **qemu-ga**: skipped. macOS has no native virtio-serial driver;
+  mav2287/qemu-guest-agent-for-macOS requires loading a kext (SIP /
+  kext-signing risk on Sequoia) and the guest is unbootable. Not worth the
+  risk; documented per plan.
+- **Regrant script note**: validated through the identity-check + csreq
+  stages on the live guest (the binary identity check passes for
+  `com.vmhub.agent`); the sqlite insert requires SIP off (see above).
+  `scripts/macos/vmhub-regrant-tcc.sh` is committed for the golden's
+  regrant path.
+
+### The blocker: the guest cannot be booted on this host right now
+
+Two independent failures, both reproducible, both exhaustively tested:
+
+**1. PVE QEMU 11.0.0 (the PVE wrapper's runtime) cannot boot this macOS.**
+OpenCore loads from the imported ESP and hands off to Apple `boot.efi`,
+which then executes a fail-trap spin: CPU pinned at one vCPU, zero serial
+output, guest RIP frozen at a spin loop (`shl rdx,0x20; mov eax,eax;
+or rax,rdx; cmp rax,r8; ja; pause; jmp` — a "return on check-pass else
+hang" trap), never reaching the kernel. Ruled out by direct testing:
+CPU line (`-cpu host` with/without the frozen `+invtsc,vmware-cpuid-freq`
+flags), SMBIOS (Apple `iMacPro1,1`-style), machine type (`pve0` variant is
+forced by PVE), PIT `lost_tick_policy`, Secure-Boot vs non-secure OVMF
+(the `.secboot` and non-secure `OVMF_CODE_4M.fd` files are byte-identical),
+vCPU count (1 and 4), OpenCore disk (freshly rebuilt from pristine EFI
+sources), and RAM headroom (13 GiB free with VM 101 stopped). This
+re-confirms the T4 probe finding ("PVE's QEMU 11.0.0 hangs…") and the
+pinned `qemuVersion: 8.2.5`.
+
+**2. The raw QEMU 8.2.5 probe path (the one working recipe) now has a
+block-layer deadlock.** OVMF retries the OpenCore disk read (Boot0002)
+three times, each attempt hanging ~2–3 min (main-loop spin, no `pread`
+ever issued — confirmed by strace), then gives up. The same binary booted
+this exact guest at probe time (2026-08-15 03:19); nothing changed by the
+factory run restores it: removed the `nbd` kernel module, removed the VNC
+password change (empty `$VNC_PASS` caused a separate main-loop spin), used
+a pristine rebuilt OpenCore disk, pristine OVMF_VARS (md5-identical to
+source), ruled out the OpenCore config content. The guest's own state is
+not the cause (a fresh disk + firmware handoff to `boot.efi` under PVE
+proves OpenCore + disk reads work under io_uring; the failure is
+environmental).
+
+### What was changed on the host (all reversible, all recorded)
+
+- LV `probe-macos` renamed → `vm-2120-disk-0` (PVE volume naming; nothing
+  references the old name).
+- `dnsmasq` installed + configured for `vmbr1` DHCP
+  (`/etc/dnsmasq.d/vmhub.conf`, range 10.10.10.50–200, router 10.10.10.1).
+  This is the fleet's intended DHCP for cloned goldens (deterministic MAC
+  → lease lookup) — left running deliberately.
+- `gdb` installed (diagnostic only).
+- VM 101 stopped temporarily for RAM headroom during testing, restarted
+  afterward (`qm start 101`, status verified running).
+- PVE `OVMF_CODE_4M.secboot.fd` temporarily swapped for the non-secure
+  variant then restored (the two files are byte-identical; no net change).
+- VM 2120 config kept as a plain VM (NOT templated — a template whose
+  clones cannot boot would poison the catalog).
+
+### Recovery path (next session)
+
+1. Resolve the raw 8.2.5 block deadlock — prime suspect is host QEMU/KVM
+   state accumulated over 45-day uptime; a host reboot (explicitly
+   forbidden this run) or a reinstall of the source-built QEMU 8.2.5 is
+   the likely fix.
+2. Boot the guest under the proven 8.2.5 recipe, finish the bake:
+   set OpenCore `csr-active-config=0x77` (SIP off), run
+   `/usr/local/bin/vmhub-regrant-tcc.sh`, verify with
+   `/usr/local/bin/vmhub-axprobe ax` + `screencap`, restore SIP, reboot,
+   re-verify grants.
+3. Only then `qm template 2120` + `qm clone` + boot-verify the clone.
+   If PVE qemu 11 remains unable to boot macOS, the template's runtime
+   must be the source-built 8.2.5 (documented PVE limitation on this
+   host).
+
+### Deviations from the frozen plan (all recorded)
+
+1. **qemu-ga skipped** — no macOS virtio-serial driver; kext route is a
+   SIP/signing risk and the guest is unbootable (recorded above).
+2. **TCC grant deferred** — requires SIP-off write access; guest became
+   unbootable first. Regrant tooling is committed and validated.
+3. **softwareupdate --schedule off is a no-op on this guest build** — the
+   daemon fails an entitlement check
+   (`com.apple.private.softwareupdate.preferences` → "No such process");
+   the durable plist keys are set instead and persist.
+4. **OpenCore csr-active-config**: the base OpenCore.qcow2 ships
+   `csr-active-config=0x0` (SIP on). The factory plan intended 0x77 for
+   the regrant path; deferred with the TCC bake.
+5. **PVE machine type**: `pc-q35-4.2` (frozen) does not exist in PVE's
+   QEMU 11 (min supported q35 is 5.0); PVE also forces the `pve0`
+   machine variant. Neither change produced a boot (see blocker #1).
