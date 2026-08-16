@@ -334,20 +334,37 @@ export class RealProxmox implements ProxmoxClient {
 
   async diskFreeBytes(): Promise<number> {
     const node = await this.node();
-    const st = (await this.request("GET", `/nodes/${node}/storage/${this.storageName()}/status`)) as { avail?: number };
+    const st = (await this.request("GET", `/nodes/${node}/storage/${await this.storageName()}/status`)) as { avail?: number };
     return Number(st.avail ?? 0);
   }
 
   async diskUsedBytes(): Promise<number> {
     const node = await this.node();
-    const st = (await this.request("GET", `/nodes/${node}/storage/${this.storageName()}/status`)) as { used?: number };
+    const st = (await this.request("GET", `/nodes/${node}/storage/${await this.storageName()}/status`)) as { used?: number };
     return Number(st.used ?? 0);
   }
 
-  private storageName(): string {
-    // The VM-data pool is the only storage vmhub allocates from. Resolve the
-    // storage by the pool name; the installer registers zfspool <pool>.
-    return process.env.PVE_STORAGE || "vmhub";
+  /**
+   * Resolve the VM-data pool this node allocates from. Reads the node's own
+   * storage list at runtime (first zfspool, else first lvmthin) so multi-node
+   * works without a global PVE_STORAGE — dl360p uses zfspool "vmhub", vostro
+   * uses local-lvm. Falls back to PVE_STORAGE, then "vmhub" (legacy).
+   */
+  private async storageName(): Promise<string> {
+    const explicit = process.env.PVE_STORAGE;
+    if (explicit && explicit.trim() !== "") return explicit;
+    const node = await this.node();
+    try {
+      const stores = (await this.request("GET", `/nodes/${node}/storage`)) as {
+        storage: string;
+        type?: string;
+      }[];
+      const pool = stores.find((s) => s.type === "zfspool") ?? stores.find((s) => s.type === "lvmthin");
+      if (pool) return pool.storage;
+    } catch {
+      // storage list unreachable — fall through to the legacy name
+    }
+    return "vmhub";
   }
 }
 
