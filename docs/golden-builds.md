@@ -407,3 +407,40 @@ of source-built QEMU 8.2.5 is the likely fix").
 NOT YET TRIED (all require user decision): host reboot (takes down VM 101 + PVE),
 qemu 8.2.5 source rebuild, or converting the golden to a raw-8.2.5-process runtime
 outside PVE (the probe model that worked).
+
+### Follow-up 2: host reboot executed — does NOT clear the boot wedge (2026-08-16)
+
+Per user approval, the Vostro host was rebooted (45-day uptime cleared, fresh KVM
+state, VM101 onboot=1 preserved postgres, VM102 stays evicted, vmbr1 re-persisted
+via provision-vostro.sh after reboot exposed it was never written to
+/etc/network/interfaces).
+
+RESULT: the macOS golden STILL does not boot. Decisive negatives recorded:
+
+- Raw 8.2.5 path (the probe's proven recipe): after reboot, the block-layer
+  deadlock (FAILURE 2, "no pread ever issued") is GONE — OVMF now gets past
+  "BdsDxe: starting Boot0002". But the guest vCPU still enters the identical
+  TSC-delay spin (thread-level 99.9%, RIP 0x7c509fef; pre-reboot RIP was
+  0x7d8ccfac — same instruction pattern `shl rdx,0x20; or rax,rdx; cmp rcx,r12;
+  jae; pause; jmp`).
+- PVE/QEMU 11 + `-cpu host` + explicit `tsc-frequency=2904000000` (measured host
+  TSC): still spins at the same RIP. The documented PVE-9 Haswell-noTSX recipe
+  was already ruled out pre-reboot.
+- CONFIRMED INDEPENDENT OF: host uptime (reboot cleared it), QEMU version
+  (8.2.5 and 11.0.0), OpenCore image (4 variants), disk source (original + snap),
+  aio backend, chardevs, and explicit tsc-frequency.
+
+CONCLUSION: the wedge is a guest-side TSC-frequency contract failure that this
+host's CPUID surface cannot satisfy for macOS — the guest reads a TSC frequency
+estimate that makes its delay deadlines unreachable (deadline keeps re-adding
+current TSC; initial deadline value is wrong). This is consistent with the
+documented macOS-on-QEMU class where macOS's TSC calibration diverges from the
+host's actual TSC rate (measured 2904 MHz vs CPUID 0x16 max 4300 MHz).
+
+REMAINING OPTIONS (require user decision): (a) run the golden as a raw 8.2.5
+process outside PVE using the probe's exact recipe with a patched/verified TSC
+presentation (e.g. cpuid 0x16 override via OpenCore config — OpenCore can fix
+TSC frequency in its config.plist), (b) modify the guest's OpenCore config.plist
+to set the correct TSC frequency / disable TSC-based delay calibration, (c) a
+different macOS version known to boot on this CPUID surface. The golden disk is
+intact + snapshotted; VM 2120 reverted to factory state (stopped).
