@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+      - run: bun run build
+      - run: bun run build:lite
+      - run: bun run build:reaper
+
+  # DMCA hygiene gate (plan R7 / issue DoD): the repo must stay free of Apple
+  # binaries. Installers (BaseSystem.dmg/img, Xcode .xip, iOS runtimes, qcow2
+  # goldens) are fetched at provision time on the host — never committed.
+  # Allowlist: *.img/*.qcow2/*.dmg ONLY under the gitignored artifacts/ dir.
+  dmca-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail on Apple binaries outside artifacts/
+        run: |
+          # Any of these extensions anywhere in the repo is a violation,
+          # EXCEPT inside the gitignored artifacts/ dir (which never commits
+          # anyway — belt and suspenders).
+          VIOLATIONS=$(git ls-files | grep -Ei '\.(qcow2|dmg|xip|ipsw)$' | grep -v '^artifacts/' || true)
+          if [ -n "$VIOLATIONS" ]; then
+            echo "::error::Apple binaries committed to the repo (DMCA risk):"
+            echo "$VIOLATIONS"
+            exit 1
+          fi
+          echo "✓ no Apple binaries tracked"
+      - name: Fail on large blobs outside artifacts/ (no LFS surprises)
+        run: |
+          # Everything >1MB must live under artifacts/ (gitignored). Anything
+          # else tracked at >1MB is an accidental binary or golden.
+          git ls-files -z | while IFS= read -r -d '' f; do
+            case "$f" in artifacts/*) continue;; esac
+            size=$(wc -c < "$f")
+            if [ "$size" -gt 1048576 ]; then
+              echo "::error::tracked file >1MB outside artifacts/: $f ($size bytes)"
+              echo "$f" >> /tmp/large-blobs
+            fi
+          done
+          if [ -s /tmp/large-blobs ]; then
+            cat /tmp/large-blobs
+            exit 1
+          fi
+          echo "✓ no large tracked blobs outside artifacts/"
+      - name: Verify artifacts/ is gitignored
+        run: |
+          if ! git check-ignore -q artifacts/.keep 2>/dev/null; then
+            echo "artifacts/ is not gitignored — add 'artifacts/' to .gitignore"
+            exit 1
+          fi
+          echo "✓ artifacts/ is gitignored"

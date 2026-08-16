@@ -89,6 +89,17 @@ export function createClientForNode(config: NodeConfig): ProxmoxClient {
  *   VMHUB_NODE_<ID>_TOKEN      per-node token (default node falls back to PVE_TOKEN)
  * The default single-node path keeps legacy PVE_HOST/PVE_TOKEN behavior.
  */
+/**
+ * Static per-node metadata. avx2 is a HARD constraint (macOS Ventura+ needs
+ * it) — a node that doesn't report it must never be advertised as satisfying
+ * avx2 templates. dl360p is E5-2670 v2 (no AVX2); vostro is i5-10400 (has it).
+ * Unknown nodes default conservative (avx2:false) so the catalog never lies.
+ */
+const NODE_STATIC_METADATA: Record<string, NodeConfig["metadata"]> = {
+  dl360p: { os: ["hyprland", "windows", "x11"], avx2: false, nestedVirt: true, ramMb: 131_072 },
+  vostro: { os: ["hyprland", "windows", "macos", "ios"], avx2: true, nestedVirt: true, ramMb: 15_744 },
+};
+
 export function resolveNodeConfigs(env: Record<string, string | undefined> = process.env): NodeConfig[] {
   const raw = env.VMHUB_NODES ?? "";
   const ids = raw.trim() === "" ? [DEFAULT_NODE_ID] : raw.split(",").map((s) => s.trim()).filter(Boolean);
@@ -103,12 +114,7 @@ export function resolveNodeConfigs(env: Record<string, string | undefined> = pro
       id,
       baseUrl,
       tokenEnv,
-      metadata: {
-        os: ["hyprland", "windows", "x11"],
-        avx2: true,
-        nestedVirt: true,
-        ramMb: 131_072, // static hint; live headroom is probed
-      },
+      metadata: NODE_STATIC_METADATA[id] ?? { os: [], avx2: false, nestedVirt: false, ramMb: 0 },
     };
   });
 }

@@ -43,18 +43,25 @@ chmod 700 "$DATADIR" "$CONFDIR"
 echo "==> env files (rendered from Doppler vars by reference, 0600)"
 # Run via: doppler run --project proxmox --config prd -- ./deploy/install.sh
 # Values come from injected env vars; nothing is hardcoded or echoed.
-if [ ! -f "$CONFDIR/lite.env" ]; then
-  cat > "$CONFDIR/lite.env" <<EOF
+# Always re-render (idempotent): the registry vars land once Doppler has them.
+cat > "$CONFDIR/lite.env" <<EOF
 PVE_HOST=${PVE_HOST:-}
 PVE_TOKEN=${PVE_TOKEN:-}
+VMHUB_NODES=${VMHUB_NODES:-}
+VMHUB_NODE_DL360P_BASE_URL=${VMHUB_NODE_DL360P_BASE_URL:-}
+VMHUB_NODE_DL360P_TOKEN=${VMHUB_NODE_DL360P_TOKEN:-}
+VMHUB_NODE_VOSTRO_BASE_URL=${VMHUB_NODE_VOSTRO_BASE_URL:-}
+VMHUB_NODE_VOSTRO_TOKEN=${VMHUB_NODE_VOSTRO_TOKEN:-}
 EOF
-fi
-if [ ! -f "$CONFDIR/reaper.env" ]; then
-  cat > "$CONFDIR/reaper.env" <<EOF
+cat > "$CONFDIR/reaper.env" <<EOF
 PVE_HOST=${PVE_HOST:-}
 PVE_TOKEN=${PVE_TOKEN:-}
+VMHUB_NODES=${VMHUB_NODES:-}
+VMHUB_NODE_DL360P_BASE_URL=${VMHUB_NODE_DL360P_BASE_URL:-}
+VMHUB_NODE_DL360P_TOKEN=${VMHUB_NODE_DL360P_TOKEN:-}
+VMHUB_NODE_VOSTRO_BASE_URL=${VMHUB_NODE_VOSTRO_BASE_URL:-}
+VMHUB_NODE_VOSTRO_TOKEN=${VMHUB_NODE_VOSTRO_TOKEN:-}
 EOF
-fi
 chmod 600 "$CONFDIR/lite.env" "$CONFDIR/reaper.env"
 
 echo "==> install systemd units"
