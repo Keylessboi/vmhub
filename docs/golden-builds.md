@@ -370,3 +370,40 @@ environmental).
 5. **PVE machine type**: `pc-q35-4.2` (frozen) does not exist in PVE's
    QEMU 11 (min supported q35 is 5.0); PVE also forces the `pve0`
    machine variant. Neither change produced a boot (see blocker #1).
+
+### Follow-up: T10 boot-gate escalation (2026-08-16, after factory BLOCKED record)
+
+Nine further boot attempts (8 recipes) all wedge at the identical 330-byte serial
+point: `BdsDxe: starting Boot0002` then a guest TSC-deadline spin at RIP
+`0x7d8ccfac` (rdtsc → combine → cmp deadline → pause → jmp), with the QEMU main
+loop healthy (strace: ppoll cycling normally, one vCPU hammering KVM_RUN).
+
+Attempted and ruled out:
+- OpenCore source: original probe-time EFI tree (02:59) + config.plist (04:13),
+  factory rebuild, raw vm-2120-disk-3, and preserved OpenCore.test.qcow2 (04:03)
+  — all wedge identically (so NOT the OpenCore image).
+- Disk source: original vm-2120-disk-0 AND the thin snapshot — dd reads both at
+  2.2-3.5 GB/s (so NOT a block-device or thinpool issue; dmesg clean, pool 72%).
+- aio: default, threads, unsafe-cache, io_uring (PVE) — wedge persists (so NOT
+  the io_uring main-loop bug class; the strace shows ppoll healthy, no busy-spin).
+- Chardevs: fresh monitor/serial sockets, -vnc none — wedge persists (so NOT a
+  stale-socket/chardev spin).
+- TSC frequency: forced tsc-frequency=2904000000 (measured host TSC 2904 MHz vs
+  cpuinfo_max_freq 4300) — wedge persists.
+- PVE/QEMU 11 documented PVE-9 Sequoia fix: `-cpu Haswell-noTSX,vendor=GenuineIntel,
+  +invtsc,+hypervisor,kvm=on,vmware-cpuid-freq=on` + `ICH9-LPC.acpi-pci-hotplug-
+  with-bridge-support=off` + `nec-usb-xhci.msi=off` via args (verified last -cpu
+  wins in qm showcmd) — still 100% CPU spin, no guest SSH.
+
+KEY OBSERVATION: guest TSC *does* advance (~2.9-3 GHz measured via register
+sampling), yet the firmware deadline loop never exits — consistent with a wrong
+TSC *frequency estimate* in the guest (CPUID 0x16 reports max 4.3 GHz; actual TSC
+2904 MHz), which macOS boot.efi/OpenCore use for delay calibration. The probe
+booted this exact disk at 03:19 under the identical 8.2.5 recipe; the host's
+45-day uptime is the prime remaining suspect (factory agent's own conclusion:
+"host QEMU/KVM state accumulated over 45-day uptime; a host reboot or reinstall
+of source-built QEMU 8.2.5 is the likely fix").
+
+NOT YET TRIED (all require user decision): host reboot (takes down VM 101 + PVE),
+qemu 8.2.5 source rebuild, or converting the golden to a raw-8.2.5-process runtime
+outside PVE (the probe model that worked).
