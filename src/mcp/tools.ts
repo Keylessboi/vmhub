@@ -8,10 +8,11 @@ import { z } from 'zod';
 import type { DesktopAdapter, Template, Vm } from '../shared/types.ts';
 import type { AdapterRegistry } from '../../adapters/index.ts';
 import type { LiteClient } from './lite-client.ts';
-import { assertToolAvailable, capabilityReport, getTemplate, templateCatalog, templateFromAdapter, type VmToolName } from './capabilities.ts';
+import { assertToolAvailable, capabilityReport, getTemplate, mergeDerivedTemplate, templateCatalog, templateFromAdapter, type VmToolName } from './capabilities.ts';
 import { errorResult, okResult, toVmError, vmError } from './errors.ts';
 import { pollUntil, POLL_BOUND_MS } from './polling.ts';
 import { writeScreenshot } from './files.ts';
+import { iosTupleAvailability } from '../../adapters/ios/tuple.ts';
 
 export interface McpDeps {
   lite: LiteClient;
@@ -47,8 +48,37 @@ async function resolveTemplate(deps: McpDeps, templateId: string): Promise<Templ
   // Local adapter id — alias to its live golden, or an honest unavailable.
   if (deps.registry.has(templateId)) {
     const local = templateFromAdapter(deps.registry.get(templateId));
+    // A direct golden for this OS wins over derivedFrom resolution.
     const realForOs = real?.find((t) => t.os === local.os);
     if (realForOs) return realForOs;
+    // Derived template (ios): resolve through the PARENT golden by
+    // derivedFrom — ios availability depends on the macos golden + version
+    // pair, never an ios golden of its own.
+    if (local.derivedFrom) {
+      if (real === undefined) return local; // degraded (lite unreachable)
+      const parent = real.find((t) => t.os === local.derivedFrom);
+      if (!parent) {
+        return {
+          ...local,
+          availability: 'unavailable',
+          reason: `no "${local.derivedFrom}" golden on Proxmox — "${local.id}" runs inside a ${local.derivedFrom} guest`,
+        };
+      }
+      if (parent.availability !== 'available') {
+        return {
+          ...local,
+          availability: 'unavailable',
+          reason: `parent ${local.derivedFrom} golden "${parent.id}" is not available (${parent.availability})`,
+        };
+      }
+      if (local.os === 'ios' && local.derivedFrom === 'macos') {
+        const tuple = iosTupleAvailability(parent);
+        if (!tuple.ok) {
+          return { ...local, availability: 'unavailable', reason: tuple.reason ?? 'no version-paired macOS golden' };
+        }
+      }
+      return parent; // lease the parent golden; the derived OS lives inside it
+    }
     if (real === undefined) return local; // degraded (lite unreachable)
     return {
       ...local,
@@ -130,6 +160,8 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         const merged = local.map((t) => {
           const realForOs = realByOs.get(t.os);
           if (realForOs) return realForOs;
+          // Derived templates (ios) resolve through their parent golden.
+          if (t.derivedFrom) return mergeDerivedTemplate(t, real);
           return {
             ...t,
             availability: 'unavailable' as const,

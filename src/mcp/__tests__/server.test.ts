@@ -364,6 +364,94 @@ describe('template catalog (real Proxmox VMIDs are the ids)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Derived templates: ios resolves through the macos golden by derivedFrom
+// ---------------------------------------------------------------------------
+
+/** Real catalog with the version-paired macOS golden baked (sequoia-15.7.9). */
+function catalogWithMacosGolden(): Template[] {
+  return [
+    ...realCatalog(),
+    {
+      id: '2090',
+      os: 'macos',
+      availability: 'available',
+      capabilities: [CAPABILITIES.screenshot, CAPABILITIES.exec],
+      ramMb: 8192,
+      vcpus: 4,
+      nestedVirt: false,
+      notes: 'Golden template macos-sequoia-15.7.9',
+    },
+  ];
+}
+
+describe('ios template resolution (derivedFrom macos)', () => {
+  async function setup() {
+    const lite = new FakeLite('macos', catalogWithMacosGolden());
+    const { client } = await connectServer({ lite });
+    return { client, lite };
+  }
+
+  it('vm_list_templates marks ios available when the macos tuple holds', async () => {
+    const { client } = await setup();
+    const res = await client.callTool({ name: 'vm_list_templates', arguments: {} });
+    const sc = res.structuredContent as { result?: { templates?: Template[] } };
+    const ios = sc.result?.templates?.find((t) => t.id === 'ios');
+    expect(ios?.availability).toBe('available');
+    expect(ios?.derivedFrom).toBe('macos');
+    expect(ios?.constraints?.[0]?.os).toBe('macos');
+    expect(ios?.notes).toContain('macos 15.7.9 ↔ iOS 26.3.1');
+  });
+
+  it('vm_lease_create with template_id ios clones the parent macos golden', async () => {
+    const { client, lite } = await setup();
+    const res = await client.callTool({
+      name: 'vm_lease_create',
+      arguments: { template_id: 'ios', owner: 'me', request_id: 'req-ios-1' },
+    });
+    const sc = res.structuredContent as { ok?: boolean; error?: { code?: string; message?: string } };
+    expect(sc.ok).toBe(true);
+    expect(lite.createLeaseCalls).toContainEqual({ templateId: '2090', requestId: 'req-ios-1' });
+  });
+
+  it('ios is unavailable when the macos golden is the wrong version', async () => {
+    const lite = new FakeLite('macos', [
+      ...realCatalog(),
+      { id: '2095', os: 'macos', availability: 'available', capabilities: [CAPABILITIES.screenshot], ramMb: 8192, vcpus: 4, nestedVirt: false, notes: 'Golden template macos-14.5' },
+    ]);
+    const { client } = await connectServer({ lite });
+    const res = await client.callTool({ name: 'vm_list_templates', arguments: {} });
+    const sc = res.structuredContent as { result?: { templates?: Template[] } };
+    const ios = sc.result?.templates?.find((t) => t.id === 'ios');
+    expect(ios?.availability).toBe('unavailable');
+    expect(ios?.reason).toContain('14.5');
+  });
+
+  it('vm_lease_create refuses ios without the tuple (typed CAPABILITY_UNAVAILABLE)', async () => {
+    const { client } = await connectServer({ lite: new FakeLite('macos', realCatalog()) });
+    const res = await client.callTool({
+      name: 'vm_lease_create',
+      arguments: { template_id: 'ios', owner: 'me', request_id: 'req-ios-2' },
+    });
+    expect(res.isError).toBe(true);
+    const sc = res.structuredContent as { error?: { code?: string; message?: string } };
+    expect(sc.error?.code).toBe('CAPABILITY_UNAVAILABLE');
+    expect(sc.error?.message).toContain('ios');
+  });
+
+  it('a direct ios golden on Proxmox wins over derivedFrom resolution', async () => {
+    const lite = new FakeLite('macos', [
+      ...catalogWithMacosGolden(),
+      { id: '2098', os: 'ios', availability: 'available', capabilities: [CAPABILITIES.screenshot], ramMb: 4096, vcpus: 2, nestedVirt: false, notes: 'Golden template ios-sim' },
+    ]);
+    const { client } = await connectServer({ lite });
+    const res = await client.callTool({ name: 'vm_lease_create', arguments: { template_id: 'ios', owner: 'me', request_id: 'req-ios-3' } });
+    const sc = res.structuredContent as { ok?: boolean };
+    expect(sc.ok).toBe(true);
+    expect(lite.createLeaseCalls).toContainEqual({ templateId: '2098', requestId: 'req-ios-3' });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Lease lifecycle (FakeLite-backed — no HTTP, no host)
 // ---------------------------------------------------------------------------
 
