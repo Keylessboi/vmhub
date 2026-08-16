@@ -444,3 +444,35 @@ TSC frequency in its config.plist), (b) modify the guest's OpenCore config.plist
 to set the correct TSC frequency / disable TSC-based delay calibration, (c) a
 different macOS version known to boot on this CPUID surface. The golden disk is
 intact + snapshotted; VM 2120 reverted to factory state (stopped).
+
+### Follow-up 3: discriminator — fresh disk wedges identically; wedge is environmental (2026-08-16)
+
+After the reboot, a decisive discriminator test was run: the STOCK OSX-KVM
+recipe (OpenCore-Boot.sh config) + `ignore_msrs=Y` (persisted via
+/etc/modprobe.d/kvm-ignore-msrs.conf — was `N` at first check, the OSX-KVM
+"required" setting) against a FRESH EMPTY qcow2 disk (NOT the golden). It
+wedged at the IDENTICAL 330-byte point (`BdsDxe: starting Boot0002` → guest
+TSC-delay spin) as every golden-disk attempt.
+
+CONCLUSION: the golden disk is NOT the wedge. The host's macOS-boot
+environment is broken independent of disk content, OpenCore image (stock vs
+rebuilt vs test), CPU model (-cpu host, Skylake-Client, Haswell-noTSX), QEMU
+version (8.2.5 raw and 11.0.0 PVE), aio backend, chardevs, tsc-frequency
+override, ignore_msrs, and host uptime (rebooted).
+
+The guest spins in a TSC-deadline loop at firmware handoff (OVMF loading
+OpenCore from the ESP). The OSX-KVM project's own diagnostic
+(run-diagnostics.sh) checks ignore_msrs — that was the one environmental
+setting not yet ruled out, and it is now set+persisted but does NOT fix it.
+
+STATUS: blocked on host-level macOS boot environment. The golden disk
+(vm-2120-disk-0) + snapshot (vm-2120-disk-0-snap) are intact. VM 2120
+reverted to factory config, stopped. All test processes cleaned.
+
+REMAINING (require deeper host investigation or user decision):
+(a) rebuild source-built QEMU 8.2.5 (source tree /tmp/qemu-8.2.5 was cleaned
+    up — would need re-download + rebuild, ~30-60 min),
+(b) inspect host kernel/KVM state for a Comet-Lake-specific TSC issue,
+(c) try a different macOS version on the fresh-disk path to see if ANY macOS
+    boots on this host right now (isolates host-vs-version),
+(d) pursue the raw-8.2.5-process runtime with a host-side TSC workaround.
