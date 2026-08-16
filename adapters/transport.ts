@@ -15,6 +15,7 @@
  * Adapters keep their own IN_VM_LAUNCHER constant (the launcher path differs
  * per golden); everything else about the transport is shared.
  */
+import { execFile } from 'node:child_process';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import type { Vm } from '../src/shared/types.ts';
 
@@ -68,3 +69,84 @@ export function vmSshMcpTransport(
     args: [...sshIntoVmArgs(vm, env), remoteCommand],
   });
 }
+
+// ---------------------------------------------------------------------------
+// SSH command runner — the exec/scp/git channel for VM-backed adapters
+//
+// macos and ios drive exec, file transfer and git over plain ssh/scp argv
+// (never a shell string). The runner is injected so unit tests fake it and
+// never touch a live host; production uses node:child_process execFile.
+// ---------------------------------------------------------------------------
+
+/** Result of one runner invocation — the exec contract with an exit code. */
+export interface SshRunResult {
+  exitCode: number;
+  /** Binary when the caller requested `encoding: 'buffer'` (screenshots). */
+  stdout: string | Buffer;
+  stderr: string;
+}
+
+export interface SshRunOptions {
+  encoding?: 'utf8' | 'buffer';
+  timeoutMs?: number;
+}
+
+/** Minimal argv runner injected into the ssh-backed adapters. */
+export interface SshRunner {
+  run(bin: string, args: string[], opts?: SshRunOptions): Promise<SshRunResult>;
+}
+
+/** ExecFile wrapper typed for both encodings (no shell, argv-only). */
+function execFileP(
+  bin: string,
+  args: string[],
+  opts: { encoding: 'utf8' | 'buffer'; timeoutMs?: number },
+): Promise<{ stdout: string | Buffer; stderr: string }> {
+  const MAX = 256 * 1024 * 1024;
+  const done = (
+    resolve: (v: { stdout: string | Buffer; stderr: string }) => void,
+    reject: (e: unknown) => void,
+    err: unknown,
+    stdout: string | Buffer,
+    stderr: string,
+  ): void => {
+    if (err) {
+      reject({ err, stdout, stderr });
+      return;
+    }
+    resolve({ stdout, stderr });
+  };
+  return new Promise((resolve, reject) => {
+    if (opts.encoding === 'buffer') {
+      execFile(bin, args, { encoding: 'buffer', timeout: opts.timeoutMs, maxBuffer: MAX }, (err, stdout: Buffer, stderr: Buffer) =>
+        done(resolve, reject, err, stdout, stderr.toString()),
+      );
+      return;
+    }
+    execFile(bin, args, { encoding: 'utf8', timeout: opts.timeoutMs, maxBuffer: MAX }, (err, stdout: string, stderr: string) =>
+      done(resolve, reject, err, stdout, stderr),
+    );
+  });
+}
+
+/**
+ * Default production runner: execFile, 30s bound, exit-code-preserving.
+ * A nonzero exit is a normal result (not a throw) so adapters surface the
+ * remote's own exit code and stderr to the agent.
+ */
+export const nodeSshRunner: SshRunner = {
+  async run(bin, args, opts = {}) {
+    const encoding = opts.encoding ?? 'utf8';
+    try {
+      const { stdout, stderr } = await execFileP(bin, args, { encoding, timeoutMs: opts.timeoutMs ?? 30_000 });
+      return { exitCode: 0, stdout, stderr };
+    } catch (e) {
+      const err = e as { err?: { code?: number | string }; stdout?: string | Buffer; stderr?: string };
+      return {
+        exitCode: typeof err.err?.code === 'number' ? err.err.code : 1,
+        stdout: err.stdout ?? '',
+        stderr: err.stderr ?? (e instanceof Error ? e.message : String(e)),
+      };
+    }
+  },
+};
