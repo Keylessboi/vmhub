@@ -221,17 +221,6 @@ function unavailable(tpl: CannedTemplate): VmError {
   };
 }
 
-/** Test/control-plane helper: is an error a typed VmError? */
-export function isVmError(err: unknown): err is VmError {
-  if (typeof err !== "object" || err === null) return false;
-  const e = err as Partial<VmError>;
-  return (
-    typeof e.code === "string" &&
-    typeof e.message === "string" &&
-    typeof e.retryable === "boolean"
-  );
-}
-
 /**
  * In-memory MockProxmox. Created VMs are immediately "running" (instant
  * provisioning), VMIDs increment per node from 1000, and the identity tag is

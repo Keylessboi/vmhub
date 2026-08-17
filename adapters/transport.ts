@@ -18,6 +18,7 @@
 import { execFile } from 'node:child_process';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import type { Vm } from '../src/shared/types.ts';
+import { vmError } from '../src/mcp/errors.ts';
 
 /** SSH user for VM transport (root by default; cloud-init injects the key). */
 export function vmSshUser(env: NodeJS.ProcessEnv = process.env): string {
@@ -57,6 +58,9 @@ export function vmSshMcpTransport(
   env: NodeJS.ProcessEnv = process.env,
   envPrefix: Record<string, string> = {},
 ): StdioClientTransport {
+  if (vm.status === 'error' || vm.status === 'destroyed') {
+    throw vmError('PROVISION_FAILED', `VM ${vm.uuid} does not exist on Proxmox — provisioning may have failed`);
+  }
   if (!vm.ip) {
     throw new Error(`vmhub transport: VM ${vm.uuid} has no ip — the static NAT address is unset`);
   }

@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { osFromTemplateName, NodeIpPool, poolForNode } from './proxmox-real.ts';
-import { isVmError } from './proxmox.ts';
+import { isVmError } from '../mcp/errors.ts';
 
 describe('osFromTemplateName', () => {
   it('maps golden names to their OS family', () => {

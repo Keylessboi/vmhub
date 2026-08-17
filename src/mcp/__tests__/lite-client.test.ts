@@ -103,6 +103,28 @@ describe('HttpLiteClient error mapping', () => {
       code: 'INVALID_REQUEST',
     });
   });
+
+  it('throws typed VmError for non-JSON 200 response', async () => {
+    const fetchMock = mockFetch();
+    fetchMock.mockResolvedValue(new Response('upstream returned html', { status: 200 }));
+    const client = new HttpLiteClient('http://test');
+    await expect(client.listVms()).rejects.toMatchObject({
+      code: 'INTERNAL',
+      message: 'lite returned non-JSON response',
+    });
+  });
+
+  it('includes raw response text in VmError detail for non-JSON 200', async () => {
+    const fetchMock = mockFetch();
+    fetchMock.mockResolvedValue(new Response('<html>bad gateway</html>', { status: 200 }));
+    const client = new HttpLiteClient('http://test');
+    try {
+      await client.listVms();
+      expect.fail('should have thrown');
+    } catch (e) {
+      expect(e).toMatchObject({ code: 'INTERNAL', detail: '<html>bad gateway</html>' });
+    }
+  });
 });
 
 describe('HttpLiteClient getVm fallback', () => {

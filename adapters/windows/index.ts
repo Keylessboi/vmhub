@@ -74,6 +74,9 @@ export class WindowsAdapter implements DesktopAdapter {
     const existing = this.conns.get(vm.uuid);
     if (existing) return existing;
 
+    if (vm.status === 'error' || vm.status === 'destroyed') {
+      throw vmError('PROVISION_FAILED', `VM ${vm.uuid} does not exist on Proxmox — provisioning may have failed`);
+    }
     if (!vm.ip) {
       throw vmError('INTERNAL', 'windows adapter: VM has no IP (not leased?)', 'Lease the VM first');
     }
@@ -108,11 +111,15 @@ export class WindowsAdapter implements DesktopAdapter {
     const conn = await this.ensureConnection(vm);
     const res = await conn.client.callTool({ name: 'Screenshot', arguments: {} });
     const image = extractImage(res.content);
+    const { width, height } = pngDimensions(image.data);
+    if (width === 0 || height === 0) {
+      throw vmError('INTERNAL', 'windows screenshot returned no dimensions');
+    }
     return {
       image: image.data,
       format: 'png',
-      width: 0,
-      height: 0,
+      width,
+      height,
       coordMapping: { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 },
     };
   }
@@ -186,6 +193,14 @@ export class WindowsAdapter implements DesktopAdapter {
     const res = await conn.client.callTool({ name: tool, arguments: args });
     return res.content;
   }
+}
+
+/** Parse PNG dimensions from the IHDR chunk (bytes 16-23). */
+export function pngDimensions(buf: Buffer): { width: number; height: number } {
+  if (buf.length < 24 || buf.readUInt32BE(0) !== 0x89504e47) {
+    return { width: 0, height: 0 };
+  }
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
 }
 
 function extractImage(content: unknown[]): { data: Buffer; mime: string } {

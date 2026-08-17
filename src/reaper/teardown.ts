@@ -10,7 +10,8 @@
 
 import { rm } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
-import { isVmError, type ProxmoxClient, type ProxmoxVm } from "../lite/proxmox.ts";
+import type { ProxmoxClient, ProxmoxVm } from "../lite/proxmox.ts";
+import { isVmError } from "../mcp/errors.ts";
 import type { ArtifactRecord, Lease, Vm } from "../shared/types.ts";
 import type { ReaperDb } from "./reaper.db.ts";
 

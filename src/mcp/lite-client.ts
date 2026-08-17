@@ -132,6 +132,9 @@ export class HttpLiteClient implements LiteClient {
     if (!res.ok) {
       throw mapLiteError(res.status, json);
     }
+    if (json === null) {
+      throw vmError('INTERNAL', 'lite returned non-JSON response', text.slice(0, 500));
+    }
     return json as T;
   }
 }

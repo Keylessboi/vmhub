@@ -3,7 +3,7 @@
  */
 import { describe, expect, test } from "vitest";
 import { MockProxmox } from "./proxmox.ts";
-import { isVmError } from "./proxmox.ts";
+import { isVmError } from "../mcp/errors.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 
 const input = {

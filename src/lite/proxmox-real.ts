@@ -15,6 +15,7 @@
 import type { Template, VmError } from "../shared/types.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 import type { CreateProxmoxVmInput, ProxmoxClient, ProxmoxVm, ProxmoxVmStatus } from "./proxmox.ts";
+import { isVmError } from "../mcp/errors.ts";
 
 export interface RealProxmoxOptions {
   host: string;
@@ -413,8 +414,4 @@ export function createRealProxmox(config: RealProxmoxNodeConfig): RealProxmox {
 /** "10.10.10.0/24", 50 → "10.10.10.50" — octet-based config to legacy IP string. */
 function hostIp(subnet: string, octet: number): string {
   return `${subnet.split("/")[0]!.split(".").slice(0, 3).join(".")}.${octet}`;
-}
-
-function isVmError(e: unknown): e is VmError {
-  return typeof e === "object" && e !== null && typeof (e as VmError).code === "string";
 }

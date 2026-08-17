@@ -232,6 +232,24 @@ describe("POST /v1/leases", () => {
       "INVALID_REQUEST",
     );
   });
+
+  test("getVm verification fails after startVm → destroys VM, throws PROVISION_FAILED", async () => {
+    const c = makeCtx();
+    const failingProx = Object.create(c.proxmox);
+    failingProx.getVm = async () => {
+      throw new Error("VM not found on Proxmox");
+    };
+    c.ctx.proxmox = failingProx;
+    const h = handler(c);
+    const { status, json } = await createLease(h, "r1");
+    expect(status).toBe(503);
+    expect(json.error.code).toBe("PROVISION_FAILED");
+    expect(json.error.retryable).toBe(false);
+    expect(json.error.hint).toBe("teardown-then-retry");
+    expect(json.error.detail).toBe("Error: VM not found on Proxmox");
+    expect(c.db.listVms()).toHaveLength(0);
+    expect(await c.proxmox.listVms()).toHaveLength(0);
+  });
 });
 
 describe("GET /v1/leases/{id}", () => {

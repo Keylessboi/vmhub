@@ -55,6 +55,14 @@ describe('vmSshMcpTransport', () => {
     expect(() => vmSshMcpTransport({ ...vm, ip: undefined }, '/usr/local/bin/launch-x11-mcp', {})).toThrow(/no ip/);
   });
 
+  it('throws PROVISION_FAILED when VM status is error', () => {
+    expect(() => vmSshMcpTransport({ ...vm, status: 'error' }, '/usr/local/bin/launch-x11-mcp', {})).toThrow(/does not exist on Proxmox/);
+  });
+
+  it('throws PROVISION_FAILED when VM status is destroyed', () => {
+    expect(() => vmSshMcpTransport({ ...vm, status: 'destroyed' }, '/usr/local/bin/launch-x11-mcp', {})).toThrow(/does not exist on Proxmox/);
+  });
+
   it('constructs a stdio transport for a VM with an ip (no throw)', () => {
     const t = vmSshMcpTransport(vm, '/usr/local/bin/launch-x11-mcp', {});
     expect(t).toBeDefined();

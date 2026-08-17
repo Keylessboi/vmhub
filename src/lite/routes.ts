@@ -32,7 +32,7 @@ import { statfsSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { ProxmoxClient } from "./proxmox.ts";
-import { isVmError } from "./proxmox.ts";
+import { isVmError, vmError } from "../mcp/errors.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 import type { NodeProbe, NodeRegistry, NodeProbeResult } from "./nodes.ts";
 import { byDiskThenId, nodeSatisfiesTemplate, PerNodeLock } from "./nodes.ts";
@@ -340,6 +340,16 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
     // Power-on failure: tear down the clone and surface the error.
     await ctx.proxmox.destroyVm(pvm.vmid);
     throw err;
+  }
+  try {
+    await ctx.proxmox.getVm(pvm.vmid);
+  } catch (err) {
+    await ctx.proxmox.destroyVm(pvm.vmid);
+    throw vmError(
+      "PROVISION_FAILED",
+      `VM ${pvm.vmid} failed Proxmox verification after start`,
+      isVmError(err) ? err.message : String(err),
+    );
   }
   ctx.db.insertVm(vm);
   try {

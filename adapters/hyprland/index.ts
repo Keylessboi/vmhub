@@ -12,11 +12,10 @@
  * fallback: spawn it as an MCP client (SDK v2 stdio transport) and map the
  * vm_* surface onto hyprland-mcp's TOOLS via HYPRLAND_TOOL_MAP.
  *
- * The binary is spawned lazily on first use, so vmhub-mcp starts and serves
- * the catalog even when Hyprland or the binary is absent — degradation is a
- * typed VmError, never a crash.
+ * All errors are typed VmError values, never crashes. When a VM has no IP
+ * (provisioning failed), the adapter throws immediately rather than silently
+ * falling back to the host desktop.
  */
-import { existsSync } from 'node:fs';
 import { Client, type Client as ClientType } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import type {
@@ -104,9 +103,9 @@ export class HyprlandAdapter implements DesktopAdapter {
     ];
   }
 
-  /** Per-VM Hyprland MCP connection. Keyed by uuid; the host desktop is "local". */
+  /** Per-VM Hyprland MCP connection, keyed by uuid. */
   private async ensureConnection(vm: Vm): Promise<HyprlandConnection> {
-    const key = vm.ip ? vm.uuid : "local";
+    const key = vm.ip ?? vm.uuid;
     const existing = this.conns.get(key);
     if (existing) return existing;
 
@@ -118,9 +117,7 @@ export class HyprlandAdapter implements DesktopAdapter {
       throw vmError(
         'INTERNAL',
         `hyprland adapter: failed to connect (${e instanceof Error ? e.message : String(e)})`,
-        vm.ip
-          ? `Could not reach Hyprland in VM at ${vm.ip}. Ensure the VM is running and the desktop session is up.`
-          : 'Hyprland must be running for hyprland-template VMs. Retry when the desktop session is up.',
+        `Could not reach Hyprland in VM at ${vm.ip}. Ensure the VM is running and the desktop session is up.`,
       );
     }
     const conn = { client, transport };
@@ -133,21 +130,18 @@ export class HyprlandAdapter implements DesktopAdapter {
    *  - vm.ip set → SSH through the Proxmox host into the VM, running the
    *    in-VM launcher (/usr/local/bin/launch-hypr-mcp). The host key + VM
    *    key are installed at golden build; -T keeps stdio clean for MCP.
-   *  - no ip (host desktop) → spawn the local compiled binary, as before.
+   *  - no ip → the VM was never provisioned; throw instead of silently
+   *    capturing the host screen (security: host screen leak).
    */
   private buildTransport(vm: Vm): StdioClientTransport {
-    if (vm.ip) {
-      return vmSshMcpTransport(vm, IN_VM_LAUNCHER);
-    }
-    const bin = hyprlandMcpBin();
-    if (!existsSync(bin)) {
+    if (!vm.ip) {
       throw vmError(
         'INTERNAL',
-        `hyprland adapter: compiled binary not found at ${bin}`,
-        `Set HYPRLAND_MCP_BIN or build hyprland-mcp (bun run build in /home/travis/Projects/hyprland-mcp).`,
+        'hyprland adapter: VM has no IP — provisioning may have failed',
+        'Ensure the VM was created and is running before connecting.',
       );
     }
-    return new StdioClientTransport({ command: bin });
+    return vmSshMcpTransport(vm, IN_VM_LAUNCHER);
   }
 
   async screenshot(vm: Vm): Promise<ScreenshotResult> {

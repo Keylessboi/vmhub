@@ -17,7 +17,7 @@ import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 import type { ProxmoxClient } from "./proxmox.ts";
 import { MockProxmox } from "./proxmox.ts";
 import { createRealProxmox } from "./proxmox-real.ts";
-import { isVmError } from "./proxmox.ts";
+import { isVmError } from "../mcp/errors.ts";
 
 export const DEFAULT_PROBE_TTL_MS = 90_000; // 60-120s window
 const STUCK_AFTER_CONSECUTIVE_AUTH_FAILURES = 3;
