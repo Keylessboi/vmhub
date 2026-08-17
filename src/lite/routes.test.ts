@@ -13,11 +13,11 @@ import { createNodeRegistry, type NodeProbe, type NodeProbeResult } from "./node
 import type { NodeConfig, NodeStatus, VmNode } from "../shared/types.ts";
 
 const T = {
-  hyprland: "2030",
-  x11: "2070",
-  ios: "2110",
-  windows: "2060",
-  macos: "2100",
+  hyprland: "2070",
+  x11: "2060",
+  ios: "2120",
+  windows: "2100",
+  macos: "2110",
 };
 
 interface Ctx {
@@ -92,7 +92,7 @@ describe("POST /v1/leases", () => {
       templateId: T.hyprland,
       adapter: "hyprland",
       status: "ready",
-      proxmoxTag: "vmhub-2030-uuid-1",
+      proxmoxTag: "vmhub-2070-uuid-1",
     });
     expect(json.vm.capabilities).toContain("screenshot");
   });
@@ -202,10 +202,6 @@ describe("POST /v1/leases", () => {
   test("unavailable/stub templates → 409 CAPABILITY_UNAVAILABLE with reason", async () => {
     const c = makeCtx();
     const h = handler(c);
-    const x11 = await createLease(h, "r-x11", T.x11);
-    expect(x11.status).toBe(409);
-    expect(x11.json.error.code).toBe("CAPABILITY_UNAVAILABLE");
-    expect(x11.json.error.detail).toBeTruthy();
     const ios = await createLease(h, "r-ios", T.ios);
     expect(ios.status).toBe(409);
     expect(ios.json.error.code).toBe("CAPABILITY_UNAVAILABLE");
@@ -371,8 +367,7 @@ describe("GET /v1/templates", () => {
     expect(ios.availability).toBe("stub");
     expect(ios.capabilities).toEqual([]);
     const x11 = templates.find((t) => t.id === T.x11);
-    expect(x11.availability).toBe("unavailable");
-    expect(x11.reason).toBeTruthy();
+    expect(x11.availability).toBe("available");
   });
 });
 
@@ -387,7 +382,7 @@ describe("GET /v1/vms + GET /v1/vms/{uuid}", () => {
     await createLease(h, "r2");
     const after = await call(h, "GET", "/v1/vms");
     expect(after.json).toHaveLength(2);
-    expect(after.json[0].proxmoxTag).toBe("vmhub-2030-uuid-1");
+    expect(after.json[0].proxmoxTag).toBe("vmhub-2070-uuid-1");
   });
 
   test("GET /v1/vms/{uuid} resolves one VM; unknown → 404", async () => {
@@ -539,7 +534,7 @@ function fakeNode(id: string, overrides: Partial<VmNode["metadata"]> = {}, ramHe
       nestedVirt: true,
       ramMb: 8192,
       diskFreePct: 80,
-      goldens: ["2030", "2060"],
+      goldens: ["2070", "2100"],
       ...overrides,
     },
   };
@@ -608,7 +603,7 @@ describe("multi-node lease routing", () => {
     expect(json.vm.nodeId).toBe("nodeA"); // tie broken by nodeId asc
     const nodeA = nodes.find((n) => n.config.id === "nodeA")!;
     expect((await nodeA.client.listVms())[0]).toMatchObject({
-      proxmoxTag: "vmhub-2030-uuid-1",
+      proxmoxTag: "vmhub-2070-uuid-1",
       nodeId: "nodeA",
     });
   });

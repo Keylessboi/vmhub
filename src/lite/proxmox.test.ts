@@ -7,7 +7,7 @@ import { isVmError } from "./proxmox.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 
 const input = {
-  templateId: "2030",
+  templateId: "2070",
   name: "hl-abcd1234",
   proxmoxTag: "vmhub-hl-uuid-1",
 };
@@ -17,7 +17,7 @@ describe("MockProxmox templates", () => {
     const px = new MockProxmox();
     const templates = await px.listTemplates();
     expect(templates.length).toBeGreaterThanOrEqual(4);
-    const hyprland = templates.find((t) => t.id === "2030");
+    const hyprland = templates.find((t) => t.id === "2070");
     expect(hyprland).toMatchObject({
       os: "hyprland",
       availability: "available",
@@ -26,7 +26,7 @@ describe("MockProxmox templates", () => {
     });
     expect(hyprland?.capabilities).toContain("screenshot");
     expect(hyprland?.capabilities).toContain("clone_repo");
-    const ios = templates.find((t) => t.id === "2110");
+    const ios = templates.find((t) => t.id === "2120");
     expect(ios?.availability).toBe("stub");
     expect(ios?.capabilities).toEqual([]);
     expect(ios?.reason).toBeTruthy();
@@ -92,7 +92,7 @@ describe("MockProxmox createVm", () => {
   test("unavailable template → CAPABILITY_UNAVAILABLE with reason", async () => {
     const px = new MockProxmox();
     try {
-      await px.createVm({ ...input, templateId: "2070" });
+      await px.createVm({ ...input, templateId: "2060" });
       expect.unreachable();
     } catch (err) {
       if (isVmError(err)) {
