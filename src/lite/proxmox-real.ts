@@ -144,7 +144,7 @@ export class RealProxmox implements ProxmoxClient {
       token: options.token,
       basePath: options.basePath || "/api2/json",
       insecure: options.insecure ?? true,
-      node: options.node ?? options.nodeId,
+      node: options.node,
       nodeId: options.nodeId,
     };
     const subnet = options.vmSubnet ?? VM_NETWORK;
