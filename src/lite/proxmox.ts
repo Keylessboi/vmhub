@@ -75,6 +75,7 @@ export interface ProxmoxClient {
 /** Internal extension: catalog entries carry the tag prefix for naming. */
 interface CannedTemplate extends Template {
   prefix: string;
+  vmid: number;
 }
 
 /**
@@ -83,7 +84,7 @@ interface CannedTemplate extends Template {
  */
 const CANNED_TEMPLATES: CannedTemplate[] = [
   {
-    id: "hyprland-2404",
+    id: "2030",
     os: "hyprland",
     availability: "available",
     capabilities: [
@@ -108,9 +109,10 @@ const CANNED_TEMPLATES: CannedTemplate[] = [
     nestedVirt: false,
     notes: "Ubuntu 24.04 golden with Hyprland — the primary local adapter.",
     prefix: "hl",
+    vmid: 2030,
   },
   {
-    id: "windows-11-24h2",
+    id: "2060",
     os: "windows",
     availability: "available",
     capabilities: [
@@ -135,9 +137,10 @@ const CANNED_TEMPLATES: CannedTemplate[] = [
     nestedVirt: false,
     notes: "Windows 11 golden with CursorTouch (pinned v0.8.5).",
     prefix: "win",
+    vmid: 2060,
   },
   {
-    id: "ubuntu-x11",
+    id: "2070",
     os: "x11",
     availability: "unavailable",
     reason: "No X11 golden image staged yet — owns the X11 driver (Phase 3.2).",
@@ -158,9 +161,10 @@ const CANNED_TEMPLATES: CannedTemplate[] = [
     vcpus: 2,
     nestedVirt: false,
     prefix: "x11",
+    vmid: 2070,
   },
   {
-    id: "macos-sequoia-15.7.9",
+    id: "2100",
     os: "macos",
     availability: "available",
     capabilities: [
@@ -186,9 +190,10 @@ const CANNED_TEMPLATES: CannedTemplate[] = [
     constraints: [{ cpu: { avx2: true }, nestedVirt: false }],
     notes: "macOS Sequoia 15.7.9 golden (24G830) with Xcode 26.3 + iOS 26.3.1 runtime — the parent VM for the ios adapter.",
     prefix: "mac",
+    vmid: 2100,
   },
   {
-    id: "ios-sim-stub",
+    id: "2110",
     os: "ios",
     availability: "stub",
     reason: "iOS adapter is a documented capabilities:[] stub (no windowing, no input).",
@@ -198,6 +203,7 @@ const CANNED_TEMPLATES: CannedTemplate[] = [
     nestedVirt: false,
     notes: "Stub so agents can always discover iOS's empty capability set.",
     prefix: "ios",
+    vmid: 2110,
   },
 ];
 
@@ -247,7 +253,7 @@ export class MockProxmox implements ProxmoxClient {
   }
 
   async listTemplates(): Promise<Template[]> {
-    return CANNED_TEMPLATES.map(({ prefix: _prefix, ...tpl }) => tpl);
+    return CANNED_TEMPLATES.map(({ prefix: _prefix, vmid: _vmid, ...tpl }) => tpl);
   }
 
   async createVm(input: CreateProxmoxVmInput): Promise<ProxmoxVm> {

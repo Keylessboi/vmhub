@@ -13,9 +13,11 @@ import { createNodeRegistry, type NodeProbe, type NodeProbeResult } from "./node
 import type { NodeConfig, NodeStatus, VmNode } from "../shared/types.ts";
 
 const T = {
-  hyprland: "hyprland-2404",
-  x11: "ubuntu-x11",
-  ios: "ios-sim-stub",
+  hyprland: "2030",
+  x11: "2070",
+  ios: "2110",
+  windows: "2060",
+  macos: "2100",
 };
 
 interface Ctx {
@@ -90,7 +92,7 @@ describe("POST /v1/leases", () => {
       templateId: T.hyprland,
       adapter: "hyprland",
       status: "ready",
-      proxmoxTag: "vmhub-hyprland-uuid-1",
+      proxmoxTag: "vmhub-2030-uuid-1",
     });
     expect(json.vm.capabilities).toContain("screenshot");
   });
@@ -385,7 +387,7 @@ describe("GET /v1/vms + GET /v1/vms/{uuid}", () => {
     await createLease(h, "r2");
     const after = await call(h, "GET", "/v1/vms");
     expect(after.json).toHaveLength(2);
-    expect(after.json[0].proxmoxTag).toBe("vmhub-hyprland-uuid-1");
+    expect(after.json[0].proxmoxTag).toBe("vmhub-2030-uuid-1");
   });
 
   test("GET /v1/vms/{uuid} resolves one VM; unknown → 404", async () => {
@@ -537,7 +539,7 @@ function fakeNode(id: string, overrides: Partial<VmNode["metadata"]> = {}, ramHe
       nestedVirt: true,
       ramMb: 8192,
       diskFreePct: 80,
-      goldens: ["hyprland-2404", "windows-11-24h2"],
+      goldens: ["2030", "2060"],
       ...overrides,
     },
   };
@@ -606,7 +608,7 @@ describe("multi-node lease routing", () => {
     expect(json.vm.nodeId).toBe("nodeA"); // tie broken by nodeId asc
     const nodeA = nodes.find((n) => n.config.id === "nodeA")!;
     expect((await nodeA.client.listVms())[0]).toMatchObject({
-      proxmoxTag: "vmhub-hyprland-uuid-1",
+      proxmoxTag: "vmhub-2030-uuid-1",
       nodeId: "nodeA",
     });
   });
@@ -614,7 +616,7 @@ describe("multi-node lease routing", () => {
   test("skips a node that lacks the template's golden", async () => {
     const nodes = [
       fakeNode("nodeA"),
-      fakeNode("nodeB", { goldens: ["windows-11-24h2"] }), // no hyprland golden
+      fakeNode("nodeB", { goldens: ["2060"] }), // no hyprland golden
     ];
     const { ctx } = makeMultiNodeCtx(nodes);
     const { status, json } = await createLease(createLiteHandler(ctx), "r1");
