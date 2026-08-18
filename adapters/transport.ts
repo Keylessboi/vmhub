@@ -62,7 +62,7 @@ export function vmSshMcpTransport(
     throw vmError('PROVISION_FAILED', `VM ${vm.uuid} does not exist on Proxmox — provisioning may have failed`);
   }
   if (!vm.ip) {
-    throw new Error(`vmhub transport: VM ${vm.uuid} has no ip — the static NAT address is unset`);
+    throw vmError('INTERNAL', `vmhub transport: VM ${vm.uuid} has no ip — the static NAT address is unset`);
   }
   const prefix = Object.entries(envPrefix)
     .map(([k, v]) => `${k}=${v}`)

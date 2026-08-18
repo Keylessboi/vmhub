@@ -73,3 +73,25 @@ describe('vmSshMcpTransport', () => {
     expect(t).toBeDefined();
   });
 });
+
+describe('vmSshMcpTransport error types', () => {
+  it('throws typed VmError with INTERNAL code when VM has no ip', () => {
+    try {
+      vmSshMcpTransport({ ...vm, ip: undefined }, '/usr/local/bin/launch-x11-mcp', {});
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toHaveProperty('code', 'INTERNAL');
+      expect(e).toHaveProperty('retryable');
+    }
+  });
+
+  it('throws typed VmError with PROVISION_FAILED code when VM status is error', () => {
+    try {
+      vmSshMcpTransport({ ...vm, status: 'error' }, '/usr/local/bin/launch-x11-mcp', {});
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toHaveProperty('code', 'PROVISION_FAILED');
+      expect(e).toHaveProperty('retryable');
+    }
+  });
+});

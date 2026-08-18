@@ -262,6 +262,7 @@ export class MockProxmox implements ProxmoxClient {
       tags: [input.proxmoxTag],
       proxmoxTag: input.proxmoxTag,
       status: "running",
+      ip: `10.10.10.${vmid % 256}`,
       createdAt: Date.now(),
     };
     this.vms.set(this.key(nodeId, vmid), vm);

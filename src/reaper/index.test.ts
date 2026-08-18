@@ -142,7 +142,7 @@ function makeVm(fx: Fixture, overrides: Partial<Vm> = {}): Vm {
   return {
     uuid: fx.uuid,
     nodeId: 'dl360p',
-    templateId: "windows-11-24h2",
+    templateId: "2100",
     adapter: "windows",
     capabilities: ["screenshot", "click", "type", "get_file"],
     proxmoxTag: fx.proxmoxTag,
@@ -171,7 +171,7 @@ function makeLease(fx: Fixture, overrides: Partial<Lease> = {}): Lease {
 /** A VM in MockProxmox whose tag+name match the lease identity. */
 async function seedProxmoxVm(proxmox: ProxmoxClient, fx: Fixture): Promise<void> {
   await proxmox.createVm({
-    templateId: "windows-11-24h2",
+    templateId: "2100",
     name: `${fx.namePrefix}-${fx.uuid}`,
     proxmoxTag: fx.proxmoxTag,
   });
@@ -223,8 +223,8 @@ describe("findVmByIdentity", () => {
     const proxmox = new MockProxmox();
     const fx = { uuid: "u-1", namePrefix: "win", proxmoxTag: "vmhub-win-u-1" } as Fixture;
     // Same tag but a name that does NOT carry the prefix — must not match.
-    await proxmox.createVm({ templateId: "windows-11-24h2", name: "other-name", proxmoxTag: "vmhub-win-u-1" });
-    await proxmox.createVm({ templateId: "windows-11-24h2", name: "win-u-1", proxmoxTag: "vmhub-win-u-1" });
+    await proxmox.createVm({ templateId: "2100", name: "other-name", proxmoxTag: "vmhub-win-u-1" });
+    await proxmox.createVm({ templateId: "2100", name: "win-u-1", proxmoxTag: "vmhub-win-u-1" });
 
     const found = await findVmByIdentity(proxmox, fx.proxmoxTag, fx.namePrefix);
     expect(found?.name).toBe("win-u-1");
@@ -232,15 +232,15 @@ describe("findVmByIdentity", () => {
 
   it("throws on an identity collision instead of guessing", async () => {
     const proxmox = new MockProxmox();
-    await proxmox.createVm({ templateId: "windows-11-24h2", name: "win-u-1", proxmoxTag: "vmhub-win-u-1" });
-    await proxmox.createVm({ templateId: "windows-11-24h2", name: "win-u-1", proxmoxTag: "vmhub-win-u-1" });
+    await proxmox.createVm({ templateId: "2100", name: "win-u-1", proxmoxTag: "vmhub-win-u-1" });
+    await proxmox.createVm({ templateId: "2100", name: "win-u-1", proxmoxTag: "vmhub-win-u-1" });
     await expect(findVmByIdentity(proxmox, "vmhub-win-u-1", "win")).rejects.toThrow(/collision/);
   });
 
   it("matches the identity tag via the tags[] array (real API shape)", async () => {
     const proxmox = new MockProxmox();
     // Real Proxmox carries vmhub-* among many tags; proxmoxTag field may be absent.
-    await proxmox.createVm({ templateId: "windows-11-24h2", name: "win-u-9", proxmoxTag: "vmhub-win-u-9" });
+    await proxmox.createVm({ templateId: "2100", name: "win-u-9", proxmoxTag: "vmhub-win-u-9" });
     const found = await findVmByIdentity(proxmox, "vmhub-win-u-9", "win");
     expect(found?.vmid).toBe(1000);
   });
@@ -547,7 +547,7 @@ describe("reaper sweep", () => {
     await seedProxmoxVm(proxmox, fx);
     // An unrelated VM on the same host, different tag — must survive.
     await proxmox.createVm({
-      templateId: "windows-11-24h2",
+      templateId: "2100",
       name: "other-0000",
       proxmoxTag: "vmhub-other-0000",
     });
@@ -834,8 +834,8 @@ describe("multi-node fail-closed sweep", () => {
       lease: makeLease(fx, { expiresAt: now - 1000 }),
     });
     const clientA = new MockProxmox("dl360p");
-    await clientA.createVm({ templateId: "windows-11-24h2", name: `${fx.namePrefix}-${fx.uuid}`, proxmoxTag: fx.proxmoxTag });
-    await clientA.createVm({ templateId: "windows-11-24h2", name: "other-0000", proxmoxTag: "vmhub-other-0000" });
+    await clientA.createVm({ templateId: "2100", name: `${fx.namePrefix}-${fx.uuid}`, proxmoxTag: fx.proxmoxTag });
+    await clientA.createVm({ templateId: "2100", name: "other-0000", proxmoxTag: "vmhub-other-0000" });
 
     // vostro: one expired lease (VM-B) on the second node.
     const uuidB = "a1b2c3d4-0000-4000-8000-000000000002";
@@ -846,7 +846,7 @@ describe("multi-node fail-closed sweep", () => {
       1001,
     );
     const clientB = new MockProxmox("vostro");
-    await clientB.createVm({ templateId: "windows-11-24h2", name: `vstr-${uuidB}`, proxmoxTag: `vmhub-vstr-${uuidB}` });
+    await clientB.createVm({ templateId: "2100", name: `vstr-${uuidB}`, proxmoxTag: `vmhub-vstr-${uuidB}` });
 
     db = await openReaperDb(fx.dbPath);
     const report = await sweepNodes(

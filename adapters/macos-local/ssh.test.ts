@@ -184,8 +184,8 @@ describe("MacosLocalAdapter putFile (upload)", () => {
     const vm = makeVm();
     await adapter.putFile(vm, "/local/file.txt", "/remote/file.txt");
     expect(runner.calls).toHaveLength(1);
-    expect(runner.calls[0].bin).toBe("scp");
-    const args = runner.calls[0].args;
+    expect(runner.calls[0]!.bin).toBe("scp");
+    const args = runner.calls[0]!.args;
     // SCP options
     expect(args).toContain("-P");
     expect(args).toContain("2222");
@@ -222,8 +222,8 @@ describe("MacosLocalAdapter getFile (download)", () => {
     const vm = makeVm();
     await adapter.getFile(vm, "/remote/file.txt", "/local/file.txt");
     expect(runner.calls).toHaveLength(1);
-    expect(runner.calls[0].bin).toBe("scp");
-    const args = runner.calls[0].args;
+    expect(runner.calls[0]!.bin).toBe("scp");
+    const args = runner.calls[0]!.args;
     expect(args).toContain("-P");
     expect(args).toContain("2222");
     expect(args).toContain("-i");
@@ -256,8 +256,8 @@ describe("MacosLocalAdapter cloneRepo", () => {
     const vm = makeVm();
     await adapter.cloneRepo(vm, "https://github.com/user/repo.git", "/tmp/repo");
     expect(runner.calls).toHaveLength(1);
-    expect(runner.calls[0].bin).toBe("ssh");
-    const args = runner.calls[0].args;
+    expect(runner.calls[0]!.bin).toBe("ssh");
+    const args = runner.calls[0]!.args;
     // SSH base args
     expect(args).toContain("-T");
     expect(args).toContain("-p");
@@ -296,7 +296,7 @@ describe("MacosLocalAdapter withKeyPath", () => {
     const vm = makeVm();
     // cloneRepo exercises the SSH runner with keyPath
     await adapter.cloneRepo(vm, "https://github.com/user/repo.git", "/tmp/repo");
-    const args = runner.calls[0].args;
+    const args = runner.calls[0]!.args;
     expect(args).toContain("-i");
     expect(args).toContain("/home/user/.ssh/id_ed25519");
   });
@@ -306,7 +306,7 @@ describe("MacosLocalAdapter withKeyPath", () => {
     const { adapter } = await makeAdapterWithVm(runner, "/custom/key");
     const vm = makeVm();
     await adapter.putFile(vm, "/local/file", "/remote/file");
-    const args = runner.calls[0].args;
+    const args = runner.calls[0]!.args;
     expect(args).toContain("-i");
     expect(args).toContain("/custom/key");
   });
@@ -316,7 +316,7 @@ describe("MacosLocalAdapter withKeyPath", () => {
     const { adapter } = await makeAdapterWithVm(runner, "/custom/key");
     const vm = makeVm();
     await adapter.getFile(vm, "/remote/file", "/local/file");
-    const args = runner.calls[0].args;
+    const args = runner.calls[0]!.args;
     expect(args).toContain("-i");
     expect(args).toContain("/custom/key");
   });
@@ -333,8 +333,8 @@ describe("MacosLocalAdapter input via SSH", () => {
     const vm = makeVm();
     await adapter.input(vm, { kind: "click", x: 100, y: 200 });
     expect(runner.calls).toHaveLength(1);
-    expect(runner.calls[0].bin).toBe("ssh");
-    const args = runner.calls[0].args;
+    expect(runner.calls[0]!.bin).toBe("ssh");
+    const args = runner.calls[0]!.args;
     expect(args).toContain("osascript");
     expect(args.some((a) => a.includes("click at {100, 200}"))).toBe(true);
   });
@@ -345,7 +345,7 @@ describe("MacosLocalAdapter input via SSH", () => {
     const vm = makeVm();
     await adapter.input(vm, { kind: "type", text: "hello world" });
     expect(runner.calls).toHaveLength(1);
-    const args = runner.calls[0].args;
+    const args = runner.calls[0]!.args;
     expect(args.some((a) => a.includes("keystroke"))).toBe(true);
     expect(args.some((a) => a.includes("hello world"))).toBe(true);
   });
@@ -356,7 +356,7 @@ describe("MacosLocalAdapter input via SSH", () => {
     const vm = makeVm();
     await adapter.input(vm, { kind: "paste", text: "pasted text" });
     expect(runner.calls).toHaveLength(1);
-    const args = runner.calls[0].args;
+    const args = runner.calls[0]!.args;
     expect(args.some((a) => a.includes("clipboard"))).toBe(true);
     expect(args.some((a) => a.includes("keystroke"))).toBe(true);
   });

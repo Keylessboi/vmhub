@@ -96,3 +96,20 @@ describe('mapHyprlandError', () => {
     expect(e.message).toContain('click');
   });
 });
+
+describe('HyprlandAdapter no-IP guard', () => {
+  it('throws typed VmError when VM has no IP', async () => {
+    const vmNoIp = {
+      uuid: 'test-vm-noip',
+      nodeId: 'local',
+      templateId: 'hyprland',
+      adapter: 'hyprland',
+      capabilities: [],
+      proxmoxTag: 'vmhub-test-test-vm-noip',
+      namePrefix: 'test',
+      status: 'ready' as const,
+      createdAt: Date.now(),
+    };
+    await expect(hyprlandAdapter.screenshot(vmNoIp)).rejects.toThrow(/no IP/);
+  });
+});
