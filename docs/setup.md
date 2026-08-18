@@ -67,6 +67,29 @@ Reboot survival: systemd units in `deploy/systemd/`. Lite restarts on boot,
 the reaper sweeps 60 seconds after boot. `deploy/install.sh` installs all of
 it.
 
+## Credential configuration
+
+Two credential paths exist for backward compatibility:
+
+| Variable | Used by | Purpose |
+|---|---|---|
+| `PVE_TOKEN` | Default node (legacy single-node) | Proxmox API token for the default host |
+| `PVE_TOKEN_ID` | All nodes | Token ID (e.g. `vmhub@pve!automation`) |
+| `VMHUB_NODE_<ID>_TOKEN` | Named nodes (multi-node) | Per-node Proxmox API tokens |
+
+**Precedence**: For the default node, `PVE_TOKEN` is used. For named nodes
+(e.g. `DL360P`, `VOSTRO`), `VMHUB_NODE_<ID>_TOKEN` takes priority. If both
+`PVE_TOKEN` and a per-node token are set, the per-node token wins for that node.
+
+**Single-node deployments**: Set `PVE_HOST`, `PVE_TOKEN_ID`, and `PVE_TOKEN`.
+The `VMHUB_NODE_*` variables can be left empty.
+
+**Multi-node deployments**: Set `VMHUB_NODES` to a comma-separated list of node
+IDs, then provide `VMHUB_NODE_<ID>_BASE_URL` and `VMHUB_NODE_<ID>_TOKEN` for
+each. `PVE_TOKEN` is still used as fallback for the default node.
+
+See `.env.example` for the full variable list.
+
 ## Docs
 
 - `docs/architecture.md` — how the three parts fit
