@@ -46,6 +46,7 @@ echo "==> env files (rendered from Doppler vars by reference, 0600)"
 # Always re-render (idempotent): the registry vars land once Doppler has them.
 cat > "$CONFDIR/lite.env" <<EOF
 PVE_HOST=${PVE_HOST:-}
+PVE_TOKEN_ID=${PVE_TOKEN_ID:-vmhub@pve!automation}
 PVE_TOKEN=${PVE_TOKEN:-}
 VMHUB_NODES=${VMHUB_NODES:-}
 VMHUB_NODE_DL360P_BASE_URL=${VMHUB_NODE_DL360P_BASE_URL:-}
@@ -55,6 +56,7 @@ VMHUB_NODE_VOSTRO_TOKEN=${VMHUB_NODE_VOSTRO_TOKEN:-}
 EOF
 cat > "$CONFDIR/reaper.env" <<EOF
 PVE_HOST=${PVE_HOST:-}
+PVE_TOKEN_ID=${PVE_TOKEN_ID:-vmhub@pve!automation}
 PVE_TOKEN=${PVE_TOKEN:-}
 VMHUB_NODES=${VMHUB_NODES:-}
 VMHUB_NODE_DL360P_BASE_URL=${VMHUB_NODE_DL360P_BASE_URL:-}
