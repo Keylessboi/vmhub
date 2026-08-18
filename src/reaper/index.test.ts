@@ -837,21 +837,20 @@ describe("multi-node fail-closed sweep", () => {
     await clientA.createVm({ templateId: "2100", name: `${fx.namePrefix}-${fx.uuid}`, proxmoxTag: fx.proxmoxTag });
     await clientA.createVm({ templateId: "2100", name: "other-0000", proxmoxTag: "vmhub-other-0000" });
 
-    // vostro: one expired lease (VM-B) on the second node.
     const uuidB = "a1b2c3d4-0000-4000-8000-000000000002";
-    const vmB = makeVm(fx, { uuid: uuidB, nodeId: "vostro", namePrefix: "vstr", proxmoxTag: `vmhub-vstr-${uuidB}` });
+    const vmB = makeVm(fx, { uuid: uuidB, nodeId: "nodeb", namePrefix: "vstr", proxmoxTag: `vmhub-vstr-${uuidB}` });
     await seedLease(
       fx,
-      { vm: vmB, lease: makeLease(fx, { vmId: uuidB, requestId: "req-vostro", expiresAt: now - 1000 }) },
+      { vm: vmB, lease: makeLease(fx, { vmId: uuidB, requestId: "req-nodeb", expiresAt: now - 1000 }) },
       1001,
     );
-    const clientB = new MockProxmox("vostro");
+    const clientB = new MockProxmox("nodeb");
     await clientB.createVm({ templateId: "2100", name: `vstr-${uuidB}`, proxmoxTag: `vmhub-vstr-${uuidB}` });
 
     db = await openReaperDb(fx.dbPath);
     const report = await sweepNodes(
       db,
-      [node("dl360p", clientA), node("vostro", clientB)],
+      [node("dl360p", clientA), node("nodeb", clientB)],
       { artifactDir: fx.artifactDir, now: () => now },
     );
 
@@ -860,7 +859,7 @@ describe("multi-node fail-closed sweep", () => {
     expect(report.nodes).toHaveLength(2);
     expect(report.nodes.map((n) => [n.nodeId, n.destroyed])).toEqual([
       ["dl360p", 1],
-      ["vostro", 1],
+      ["nodeb", 1],
     ]);
     // Each VM was destroyed on ITS OWN node's client; the foreign VM survived.
     const remainingA = await clientA.listVms();
@@ -919,8 +918,8 @@ describe("node registry resolution", () => {
     "VMHUB_NODES",
     "VMHUB_NODE_DL360P_BASE_URL",
     "VMHUB_NODE_DL360P_TOKEN",
-    "VMHUB_NODE_VOSTRO_BASE_URL",
-    "VMHUB_NODE_VOSTRO_TOKEN",
+    "VMHUB_NODE_NODEB_BASE_URL",
+    "VMHUB_NODE_NODEB_TOKEN",
     "PVE_HOST",
     "PVE_TOKEN",
     "PVE_TOKEN_ID",
@@ -950,36 +949,36 @@ describe("node registry resolution", () => {
 
   it("resolves a multi-node fleet from VMHUB_NODES + per-node env", () => {
     const cfgs = resolveNodeConfigs({
-      VMHUB_NODES: "dl360p, vostro",
+      VMHUB_NODES: "dl360p, nodeb",
       VMHUB_NODE_DL360P_BASE_URL: "10.0.0.2:8006",
-      VMHUB_NODE_VOSTRO_BASE_URL: "10.0.0.3:8006",
-      VMHUB_NODE_VOSTRO_TOKEN: "secret",
+      VMHUB_NODE_NODEB_BASE_URL: "10.0.0.3:8006",
+      VMHUB_NODE_NODEB_TOKEN: "secret",
     });
-    expect(cfgs.map((c) => c.id)).toEqual(["dl360p", "vostro"]);
+    expect(cfgs.map((c) => c.id)).toEqual(["dl360p", "nodeb"]);
     expect(cfgs[1]?.baseUrl).toBe("10.0.0.3:8006");
-    expect(cfgs[1]?.tokenEnv).toBe("VMHUB_NODE_VOSTRO_TOKEN");
+    expect(cfgs[1]?.tokenEnv).toBe("VMHUB_NODE_NODEB_TOKEN");
     expect(cfgs[0]?.baseUrl).toBe("10.0.0.2:8006");
     // Default node still falls back to the legacy PVE_TOKEN naming.
     expect(cfgs[0]?.tokenEnv).toBe("PVE_TOKEN");
   });
 
   it("createClientForNode builds a node-aware MockProxmox when no token is set", () => {
-    const client = createClientForNode(defaultNodeConfig("vostro"));
+    const client = createClientForNode(defaultNodeConfig("nodeb"));
     expect(client).toBeInstanceOf(MockProxmox);
-    expect((client as MockProxmox).nodeId).toBe("vostro");
+    expect((client as MockProxmox).nodeId).toBe("nodeb");
   });
 
   it("createClientForNode builds a RealProxmox when token + baseUrl are present", () => {
-    process.env.VMHUB_NODE_VOSTRO_BASE_URL = "10.0.0.3:8006";
-    process.env.VMHUB_NODE_VOSTRO_TOKEN = "secret";
+    process.env.VMHUB_NODE_NODEB_BASE_URL = "10.0.0.3:8006";
+    process.env.VMHUB_NODE_NODEB_TOKEN = "secret";
     const cfg = resolveNodeConfigs({
-      VMHUB_NODES: "vostro",
-      VMHUB_NODE_VOSTRO_BASE_URL: "10.0.0.3:8006",
-      VMHUB_NODE_VOSTRO_TOKEN: "secret",
+      VMHUB_NODES: "nodeb",
+      VMHUB_NODE_NODEB_BASE_URL: "10.0.0.3:8006",
+      VMHUB_NODE_NODEB_TOKEN: "secret",
     })[0]!;
     const client = createClientForNode(cfg);
     expect(client).toBeInstanceOf(RealProxmox);
     const opts = (client as unknown as { opts: { nodeId?: string } }).opts;
-    expect(opts.nodeId).toBe("vostro");
+    expect(opts.nodeId).toBe("nodeb");
   });
 });

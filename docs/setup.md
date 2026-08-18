@@ -78,8 +78,8 @@ Two credential paths exist for backward compatibility:
 | `VMHUB_NODE_<ID>_TOKEN` | Named nodes (multi-node) | Per-node Proxmox API tokens |
 
 **Precedence**: For the default node, `PVE_TOKEN` is used. For named nodes
-(e.g. `DL360P`, `VOSTRO`), `VMHUB_NODE_<ID>_TOKEN` takes priority. If both
-`PVE_TOKEN` and a per-node token are set, the per-node token wins for that node.
+(e.g. `DL360P`), `VMHUB_NODE_<ID>_TOKEN` takes priority. If both `PVE_TOKEN`
+and a per-node token are set, the per-node token wins for that node.
 
 **Single-node deployments**: Set `PVE_HOST`, `PVE_TOKEN_ID`, and `PVE_TOKEN`.
 The `VMHUB_NODE_*` variables can be left empty.

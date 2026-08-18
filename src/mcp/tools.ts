@@ -12,7 +12,6 @@ import { assertToolAvailable, capabilityReport, getTemplate, mergeDerivedTemplat
 import { errorResult, okResult, toVmError, vmError } from './errors.ts';
 import { pollUntil, POLL_BOUND_MS } from './polling.ts';
 import { writeScreenshot } from './files.ts';
-import { iosTupleAvailability } from '../../adapters/ios/tuple.ts';
 
 export interface McpDeps {
   lite: LiteClient;
@@ -51,9 +50,7 @@ async function resolveTemplate(deps: McpDeps, templateId: string): Promise<Templ
     // A direct golden for this OS wins over derivedFrom resolution.
     const realForOs = real?.find((t) => t.os === local.os);
     if (realForOs) return realForOs;
-    // Derived template (ios): resolve through the PARENT golden by
-    // derivedFrom — ios availability depends on the macos golden + version
-    // pair, never an ios golden of its own.
+    // Derived template: resolve through the PARENT golden by derivedFrom.
     if (local.derivedFrom) {
       if (real === undefined) return local; // degraded (lite unreachable)
       const parent = real.find((t) => t.os === local.derivedFrom);
@@ -70,12 +67,6 @@ async function resolveTemplate(deps: McpDeps, templateId: string): Promise<Templ
           availability: 'unavailable',
           reason: `parent ${local.derivedFrom} golden "${parent.id}" is not available (${parent.availability})`,
         };
-      }
-      if (local.os === 'ios' && local.derivedFrom === 'macos') {
-        const tuple = iosTupleAvailability(parent);
-        if (!tuple.ok) {
-          return { ...local, availability: 'unavailable', reason: tuple.reason ?? 'no version-paired macOS golden' };
-        }
       }
       return parent; // lease the parent golden; the derived OS lives inside it
     }
@@ -186,7 +177,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       title: 'VM capabilities (runtime query)',
       description:
         'Runtime capability query for one template/adapter id: the full Capability declaration (windowing, input modalities, semantic tree, file transports, exec) plus the tool-surface capabilities actually available.',
-      inputSchema: z.object({ id: z.string().describe('Template/adapter id, e.g. "hyprland", "windows", "ios"') }),
+      inputSchema: z.object({ id: z.string().describe('Template/adapter id, e.g. "hyprland", "windows"') }),
       annotations: { readOnlyHint: true },
     },
     async ({ id }) => {

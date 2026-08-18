@@ -118,8 +118,6 @@ export function osFromTemplateName(name: string | undefined): Template["os"] {
   if (n.startsWith("windows") || n.startsWith("win")) return "windows";
   if (n.startsWith("android")) return "android";
   if (n.startsWith("x11") || n.startsWith("ubuntu-x11")) return "x11";
-  if (n.startsWith("macos") || n.startsWith("mac")) return "macos";
-  if (n.startsWith("ios")) return "ios";
   return "headless";
 }
 
@@ -348,8 +346,8 @@ export class RealProxmox implements ProxmoxClient {
   /**
    * Resolve the VM-data pool this node allocates from. Reads the node's own
    * storage list at runtime (first zfspool, else first lvmthin) so multi-node
-   * works without a global PVE_STORAGE — dl360p uses zfspool "vmhub", vostro
-   * uses local-lvm. Falls back to PVE_STORAGE, then "vmhub" (legacy).
+   * works without a global PVE_STORAGE. Falls back to PVE_STORAGE, then
+   * "vmhub" (legacy).
    */
   private async storageName(): Promise<string> {
     const explicit = process.env.PVE_STORAGE;

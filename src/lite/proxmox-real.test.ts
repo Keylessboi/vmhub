@@ -23,12 +23,6 @@ describe('osFromTemplateName', () => {
     expect(osFromTemplateName('WINDOWS-11')).toBe('windows');
   });
 
-  it('maps macos/ios names to their families', () => {
-    expect(osFromTemplateName('macos-14')).toBe('macos');
-    expect(osFromTemplateName('mac-ventura')).toBe('macos');
-    expect(osFromTemplateName('ios-sim')).toBe('ios');
-  });
-
   it('falls back to headless for unknown names', () => {
     expect(osFromTemplateName('unknown-box')).toBe('headless');
     expect(osFromTemplateName(undefined)).toBe('headless');

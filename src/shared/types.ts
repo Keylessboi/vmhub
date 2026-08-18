@@ -16,9 +16,7 @@ export type WindowingSystem =
   | "hyprland"
   | "x11"
   | "windows"
-  | "macos"
   | "android"
-  | "ios"
   | "headless"
   | "none";
 
@@ -140,7 +138,7 @@ export interface VmNode {
 
 /** Template→node affinity constraints. Evaluated against node metadata at query time. */
 export interface TemplateConstraint {
-  /** Required host OS family. MAY differ from Template.os (ios runs inside macos). */
+  /** Required host OS family. MAY differ from Template.os. */
   os?: WindowingSystem;
   cpu?: { avx2?: boolean };
   nestedVirt?: boolean;
@@ -148,7 +146,7 @@ export interface TemplateConstraint {
   minRamMb?: number;
   /** Minimum free disk percent (live-probed). */
   minDiskFreePct?: number;
-  /** Version-paired runtime required on the node (e.g. ios-simctl@xcode-26). */
+  /** Version-paired runtime required on the node. */
   runtime?: string;
 }
 
@@ -281,7 +279,7 @@ export interface Template {
   nestedVirt: boolean;
   /** Template→node affinity constraints. Absent = any capable node. */
   constraints?: TemplateConstraint[];
-  /** Parent template id for derived templates (ios derives from macos). */
+  /** Parent template id for derived templates. */
   derivedFrom?: string;
   /** Human-readable notes. */
   notes?: string;

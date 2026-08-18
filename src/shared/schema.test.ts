@@ -63,7 +63,7 @@ describe("schema cross-lane equivalence", () => {
     reaperConn
       .prepare(
         `INSERT INTO vms (uuid, vmid, nodeId, templateId, adapter, capabilities, proxmoxTag, namePrefix, status, createdAt)
-         VALUES ('u2', 1001, 'vostro', 'macos-sequoia-1.0.0', 'macos', '[]', 'vmhub-mac-u2', 'mac', 'ready', 1000)`,
+         VALUES ('u2', 1001, 'dl360p', 'windows-11-24h2', 'windows', '[]', 'vmhub-win-u2', 'win', 'ready', 1000)`,
       )
       .run();
     reaperConn.close();
@@ -75,6 +75,6 @@ describe("schema cross-lane equivalence", () => {
       .get() as { nodeId: string };
     liteConn.close();
 
-    expect(row.nodeId).toBe("vostro");
+    expect(row.nodeId).toBe("dl360p");
   });
 });

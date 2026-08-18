@@ -11,7 +11,6 @@
 import type { Capability, CapabilityId, DesktopAdapter, Template, TemplateConstraint, VmError, WindowingSystem } from '../shared/types.ts';
 import { CAPABILITIES } from '../shared/types.ts';
 import type { AdapterRegistry } from '../../adapters/index.ts';
-import { iosTupleAvailability } from '../../adapters/ios/tuple.ts';
 import { vmError } from './errors.ts';
 
 /** The 22 vm_* tools, in registration order (also the doc order). */
@@ -122,13 +121,11 @@ const TEMPLATE_META: Record<string, TemplateMeta> = {
   x11: { ramMb: 4096, vcpus: 2, nestedVirt: false, notes: 'X11 desktop VM (golden x11-2404) via computer-use-linux.' },
   headless: { ramMb: 4096, vcpus: 2, nestedVirt: false, notes: 'Headless Linux golden (debian-13-golden): exec/SSH only, no display tools.' },
   windows: { ramMb: 8192, vcpus: 4, nestedVirt: true, notes: 'Windows desktop VM via in-VM CursorTouch (golden windows-11-24h2).' },
-  macos: { ramMb: 8192, vcpus: 4, nestedVirt: false, notes: 'macOS desktop VM (golden macos-sequoia-15.7.9) via in-VM mac-control-mcp.' },
   android: { ramMb: 4096, vcpus: 2, nestedVirt: true, notes: 'Android via host-side ADB (golden android-9-golden).' },
-  ios: { ramMb: 8192, vcpus: 4, nestedVirt: false, notes: 'iOS Simulator inside the macOS golden — simctl v1 / idb v2 (derivedFrom macos).' },
 };
 
-/** Production-real adapters: the live goldens. Windows+android+macos are real now. */
-const AVAILABLE_ADAPTERS: ReadonlySet<string> = new Set(['hyprland', 'x11', 'headless', 'windows', 'macos', 'android']);
+/** Production-real adapters: the live goldens. */
+const AVAILABLE_ADAPTERS: ReadonlySet<string> = new Set(['hyprland', 'x11', 'headless', 'windows', 'android']);
 
 /** availability reason text for stub adapters — never hidden from agents. */
 function stubReason(adapterId: string, os: WindowingSystem): string {
@@ -139,7 +136,7 @@ function stubReason(adapterId: string, os: WindowingSystem): string {
 interface AdapterTemplateExtras {
   derivedFrom?: string;
   templateConstraints?: TemplateConstraint[];
-  /** Local-matrix availability override (conditional adapters like ios). */
+  /** Local-matrix availability override (conditional adapters). */
   localAvailability?: Template['availability'];
   availabilityReason?: string;
 }
@@ -158,8 +155,8 @@ function adapterExtras(adapter: DesktopAdapter): AdapterTemplateExtras {
  * Derive a Template from an adapter. capabilities = what the 22-tool surface
  * can serve on this adapter (the honest full declaration stays on the
  * adapter's Capability, visible via vm_capabilities). derivedFrom/constraints
- * declared by the adapter are surfaced so derived templates (ios → macos) and
- * node affinity are visible before creation.
+ * declared by the adapter are surfaced so derived templates and node affinity
+ * are visible before creation.
  */
 export function templateFromAdapter(adapter: DesktopAdapter): Template {
   const meta = TEMPLATE_META[adapter.id] ?? { ramMb: 2048, vcpus: 2, nestedVirt: false };
@@ -185,9 +182,8 @@ export function templateFromAdapter(adapter: DesktopAdapter): Template {
 }
 
 /**
- * Merge a derived template (ios) against the live catalog: it resolves through
- * its PARENT golden, and the ios→macos case is additionally gated on the
- * version-locked runtime tuple.
+ * Merge a derived template against the live catalog: it resolves through
+ * its PARENT golden.
  */
 export function mergeDerivedTemplate(local: Template, real: Template[]): Template {
   const parent = real.find((r) => r.os === local.derivedFrom);
@@ -203,16 +199,6 @@ export function mergeDerivedTemplate(local: Template, real: Template[]): Templat
       ...local,
       availability: 'unavailable',
       reason: `parent ${local.derivedFrom} golden "${parent.id}" is not available (${parent.availability})`,
-    };
-  }
-  if (local.os === 'ios' && local.derivedFrom === 'macos') {
-    const tuple = iosTupleAvailability(parent);
-    if (!tuple.ok) return { ...local, availability: 'unavailable', reason: tuple.reason ?? 'no version-paired macOS golden' };
-    const { reason: _dropped, ...rest } = local;
-    return {
-      ...rest,
-      availability: 'available',
-      notes: `${local.notes ?? ''} Runs inside ${local.derivedFrom} golden ${parent.id} — ${tuple.label ?? ''}`,
     };
   }
   const { reason: _dropped, ...rest } = local;

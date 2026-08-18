@@ -9,11 +9,8 @@ import type { DesktopAdapter } from '../src/shared/types.ts';
 import { hyprlandAdapter } from './hyprland/index.ts';
 import { x11Adapter } from './x11/index.ts';
 import { windowsAdapter } from './windows/index.ts';
-import { macosAdapter } from './macos/index.ts';
 import { androidAdapter } from './android/index.ts';
-import { iosAdapter } from './ios/index.ts';
 import { headlessAdapter } from './headless/index.ts';
-import { MacosLocalAdapter } from './macos-local/index.ts';
 
 export interface AdapterRegistry {
   /** All registered adapter ids, sorted (stable catalog order). */
@@ -60,10 +57,7 @@ export function defaultRegistry(): AdapterRegistry {
     hyprland: hyprlandAdapter,
     x11: x11Adapter,
     windows: windowsAdapter,
-    macos: macosAdapter,
-    "macos-local": new MacosLocalAdapter(),
     android: androidAdapter,
-    ios: iosAdapter,
     headless: headlessAdapter,
   });
 }

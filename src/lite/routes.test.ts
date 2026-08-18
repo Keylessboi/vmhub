@@ -15,9 +15,7 @@ import type { NodeConfig, NodeStatus, VmNode } from "../shared/types.ts";
 const T = {
   hyprland: "2070",
   x11: "2060",
-  ios: "2120",
   windows: "2100",
-  macos: "2110",
 };
 
 interface Ctx {
@@ -199,14 +197,6 @@ describe("POST /v1/leases", () => {
     expect(json.error.retryable).toBe(false);
   });
 
-  test("unavailable/stub templates → 409 CAPABILITY_UNAVAILABLE with reason", async () => {
-    const c = makeCtx();
-    const h = handler(c);
-    const ios = await createLease(h, "r-ios", T.ios);
-    expect(ios.status).toBe(409);
-    expect(ios.json.error.code).toBe("CAPABILITY_UNAVAILABLE");
-  });
-
   test("refuses to allocate when disk is below the threshold → 507 DISK_FULL", async () => {
     const c = makeCtx({ diskFreePct: () => 10 });
     const { status, json } = await createLease(handler(c), "r1");
@@ -381,9 +371,6 @@ describe("GET /v1/templates", () => {
     const hyprland = templates.find((t) => t.id === T.hyprland);
     expect(hyprland).toMatchObject({ os: "hyprland", availability: "available" });
     expect(hyprland.capabilities).toContain("screenshot");
-    const ios = templates.find((t) => t.id === T.ios);
-    expect(ios.availability).toBe("stub");
-    expect(ios.capabilities).toEqual([]);
     const x11 = templates.find((t) => t.id === T.x11);
     expect(x11.availability).toBe("available");
   });

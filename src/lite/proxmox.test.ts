@@ -16,7 +16,7 @@ describe("MockProxmox templates", () => {
   test("listTemplates returns the shared-shape catalog", async () => {
     const px = new MockProxmox();
     const templates = await px.listTemplates();
-    expect(templates.length).toBeGreaterThanOrEqual(4);
+    expect(templates.length).toBeGreaterThanOrEqual(3);
     const hyprland = templates.find((t) => t.id === "2070");
     expect(hyprland).toMatchObject({
       os: "hyprland",
@@ -26,10 +26,6 @@ describe("MockProxmox templates", () => {
     });
     expect(hyprland?.capabilities).toContain("screenshot");
     expect(hyprland?.capabilities).toContain("clone_repo");
-    const ios = templates.find((t) => t.id === "2120");
-    expect(ios?.availability).toBe("stub");
-    expect(ios?.capabilities).toEqual([]);
-    expect(ios?.reason).toBeTruthy();
   });
 });
 

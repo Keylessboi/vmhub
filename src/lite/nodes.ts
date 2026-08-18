@@ -90,14 +90,13 @@ export function createClientForNode(config: NodeConfig): ProxmoxClient {
  * The default single-node path keeps legacy PVE_HOST/PVE_TOKEN behavior.
  */
 /**
- * Static per-node metadata. avx2 is a HARD constraint (macOS Ventura+ needs
- * it) — a node that doesn't report it must never be advertised as satisfying
- * avx2 templates. dl360p is E5-2670 v2 (no AVX2); vostro is i5-10400 (has it).
- * Unknown nodes default conservative (avx2:false) so the catalog never lies.
+ * Static per-node metadata. avx2 is a HARD constraint — a node that doesn't
+ * report it must never be advertised as satisfying avx2 templates. dl360p is
+ * E5-2670 v2 (no AVX2). Unknown nodes default conservative (avx2:false) so
+ * the catalog never lies.
  */
 const NODE_STATIC_METADATA: Record<string, NodeConfig["metadata"]> = {
   dl360p: { os: ["hyprland", "windows", "x11"], avx2: false, nestedVirt: true, ramMb: 131_072 },
-  vostro: { os: ["hyprland", "windows", "macos", "ios"], avx2: true, nestedVirt: true, ramMb: 15_744 },
 };
 
 export function resolveNodeConfigs(env: Record<string, string | undefined> = process.env): NodeConfig[] {
