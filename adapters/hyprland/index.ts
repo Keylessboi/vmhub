@@ -144,8 +144,8 @@ export class HyprlandAdapter implements DesktopAdapter {
     return vmSshMcpTransport(vm, IN_VM_LAUNCHER);
   }
 
-  async screenshot(vm: Vm): Promise<ScreenshotResult> {
-    const res = await this.call(vm, 'screenshot', { target: 'screen', jpeg: false });
+  async screenshot(vm: Vm, opts?: { jpeg?: boolean }): Promise<ScreenshotResult> {
+    const res = await this.call(vm, 'screenshot', { target: 'screen', jpeg: opts?.jpeg ?? false });
     const result = res.result as {
       geometry?: { x: number; y: number; w: number; h: number };
       empty?: boolean;
@@ -302,6 +302,14 @@ export class HyprlandAdapter implements DesktopAdapter {
       throw mapHyprlandError(sc?.error, name);
     }
     return { result: sc?.result ?? {}, content: res.content };
+  }
+
+  releaseConnection(vm: Vm): void {
+    const conn = this.conns.get(vm.uuid);
+    if (conn) {
+      conn.transport.close().catch(() => {});
+      this.conns.delete(vm.uuid);
+    }
   }
 }
 

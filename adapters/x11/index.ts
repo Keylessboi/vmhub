@@ -135,8 +135,8 @@ export class X11Adapter implements DesktopAdapter {
     return conn;
   }
 
-  async screenshot(vm: Vm): Promise<ScreenshotResult> {
-    const res = await this.call(vm, X11_TOOL_MAP.screenshot, {});
+  async screenshot(vm: Vm, opts?: { jpeg?: boolean }): Promise<ScreenshotResult> {
+    const res = await this.call(vm, X11_TOOL_MAP.screenshot, { jpeg: opts?.jpeg ?? false });
     const image = extractImage(res.content);
     // computer-use-linux puts the caption (width/height/coordinate dims) in a
     // text content block next to the image — same pattern as hyprland.
@@ -290,6 +290,14 @@ export class X11Adapter implements DesktopAdapter {
       throw mapX11ActionError(payload, name);
     }
     return { result: payload ?? {}, content: res.content };
+  }
+
+  releaseConnection(vm: Vm): void {
+    const conn = this.conns.get(vm.uuid);
+    if (conn) {
+      conn.transport.close().catch(() => {});
+      this.conns.delete(vm.uuid);
+    }
   }
 }
 

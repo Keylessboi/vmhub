@@ -107,7 +107,7 @@ export class WindowsAdapter implements DesktopAdapter {
     return conn;
   }
 
-  async screenshot(vm: Vm): Promise<ScreenshotResult> {
+  async screenshot(vm: Vm, opts?: { jpeg?: boolean }): Promise<ScreenshotResult> {
     const conn = await this.ensureConnection(vm);
     const res = await conn.client.callTool({ name: 'Screenshot', arguments: {} });
     const image = extractImage(res.content);
@@ -210,6 +210,14 @@ export class WindowsAdapter implements DesktopAdapter {
     const tool = verb === 'launch' ? 'App' : verb === 'focus' ? 'App' : verb === 'close' ? 'App' : verb;
     const res = await conn.client.callTool({ name: tool, arguments: args });
     return res.content;
+  }
+
+  releaseConnection(vm: Vm): void {
+    const conn = this.conns.get(vm.uuid);
+    if (conn) {
+      conn.transport.close().catch(() => {});
+      this.conns.delete(vm.uuid);
+    }
   }
 }
 
