@@ -327,7 +327,7 @@ export interface ScreenshotResult {
 export type ClickAction = { kind: "click"; x: number; y: number; button?: "left" | "right" | "middle" };
 export type TypeAction = { kind: "type"; text: string };
 export type KeyAction = { kind: "key"; chord: string };
-export type DragAction = { kind: "drag"; from: { x: number; y: number }; to: { x: number; y: number } };
+export type DragAction = { kind: "drag"; from: { x: number; y: number }; to: { x: number; y: number }; button?: "left" | "right" };
 export type PasteAction = { kind: "paste"; text: string };
 export type GestureAction = { kind: "gesture"; type: "swipe" | "tap" | "longPress" | "pinch"; x: number; y: number; dx?: number; dy?: number };
 
@@ -376,7 +376,7 @@ export interface DesktopAdapter {
    * gates tool registration on this.
    */
   availableTools(): CapabilityId[];
-  screenshot(vm: Vm): Promise<ScreenshotResult>;
+  screenshot(vm: Vm, opts?: { jpeg?: boolean }): Promise<ScreenshotResult>;
   input(vm: Vm, action: InputAction): Promise<void>;
   listWindows(vm: Vm): Promise<WindowInfo[]>;
   inspect(vm: Vm): Promise<SemanticElement>;
@@ -387,4 +387,6 @@ export interface DesktopAdapter {
   cloneRepo?(vm: Vm, repoUrl: string, destPath: string): Promise<void>;
   /** Validated escape hatch — generalized hyprland dispatch. */
   dispatch?(vm: Vm, verb: string, args: Record<string, unknown>): Promise<unknown>;
+  /** Clean up connection state for a VM being released/destroyed. */
+  releaseConnection?(vm: Vm): void;
 }

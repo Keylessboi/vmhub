@@ -221,6 +221,17 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         const real = await getCachedTemplates(deps);
         const t = real.find((r) => r.id === id);
         if (!t) {
+          try {
+            const vm = await deps.lite.getVm(id);
+            if (vm?.adapter) {
+              const adapter = deps.registry.has(vm.adapter) ? deps.registry.get(vm.adapter) : undefined;
+              if (adapter) {
+                const report = capabilityReport(adapter);
+                return okResult('vm_capabilities', { ...report, vm: { uuid: vm.uuid, adapter: vm.adapter } }, start);
+              }
+            }
+          } catch {
+          }
           throw vmError(
             'NOT_FOUND',
             `unknown template "${id}"`,
@@ -437,7 +448,22 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
     async ({ lease_id }) => {
       const start = Date.now();
       try {
+        let adapterId: string | undefined;
+        let vmUuid: string | undefined;
+        try {
+          const { vm } = await deps.lite.getLease(lease_id);
+          adapterId = vm.adapter;
+          vmUuid = vm.uuid;
+        } catch {
+          // lease may already be gone (e.g. reaper); skip cleanup
+        }
         await deps.lite.releaseLease(lease_id);
+        if (adapterId && vmUuid && deps.registry.has(adapterId)) {
+          try {
+            const adapter = deps.registry.get(adapterId);
+            adapter.releaseConnection?.({ uuid: vmUuid } as Vm);
+          } catch {}
+        }
         return okResult('vm_lease_release', { released: true, lease_id }, start);
       } catch (e) {
         return errorResult('vm_lease_release', toVmError(e, 'vm_lease_release'), start);
@@ -466,7 +492,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         const adapter = await adapterFor(deps, vm, 'vm_screenshot');
         if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
         try {
-          const shot = await adapter.screenshot(vm);
+          const shot = await adapter.screenshot(vm, { jpeg });
           const written = await writeScreenshot(vm.uuid, shot);
           const payload = { ...written, jpeg };
           return {
@@ -577,7 +603,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
     {
       title: 'Type text',
       description: 'Type ASCII text into the focused window of the VM (fast path; use vm_paste for Unicode).',
-      inputSchema: z.object({ vm_id: z.string(), text: z.string() }),
+      inputSchema: z.object({ vm_id: z.string(), text: z.string().regex(/^[\x20-\x7E\n\r\t]*$/, 'vm_type only accepts ASCII text — use vm_paste for Unicode') }),
       annotations: { destructiveHint: true },
     },
     async ({ vm_id, text }) => {
@@ -676,7 +702,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         const adapter = await adapterFor(deps, vm, 'vm_drag');
         if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
         try {
-          await adapter.input(vm, { kind: 'drag', from: { x: from_x, y: from_y }, to: { x: to_x, y: to_y } });
+          await adapter.input(vm, { kind: 'drag', from: { x: from_x, y: from_y }, to: { x: to_x, y: to_y }, button });
           return okResult('vm_drag', { dragged: true, from: [from_x, from_y], to: [to_x, to_y] }, start);
         } finally {
           if (DRAIN_ENABLED) await deps.lite.decrementToolCalls(vm.uuid);
