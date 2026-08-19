@@ -29,7 +29,7 @@ describe('buildMcpServer', () => {
     const tools = await client.listTools();
     expect(tools.tools.length).toBe(23);
     const names = tools.tools.map((t) => t.name);
-    for (const tool of ['vm_list_templates', 'vm_list_vms', 'vm_lease_create', 'vm_screenshot', 'vm_click', 'vm_lease_release']) {
+    for (const tool of ['vm_list_templates', 'vm_lease_create', 'vm_screenshot', 'vm_click', 'vm_lease_release', 'vm_list_vms']) {
       expect(names).toContain(tool);
     }
   });

@@ -42,6 +42,20 @@ export const DEFAULT_HINT: Record<ErrorCode, VmError['hint']> = {
 };
 
 /** Build a VmError for a code using the default retry/hint policy. */
+/** Convenience error for a tool that requires a capability the VM lacks. */
+export function capabilityUnavailableError(
+  tool: string,
+  adapter: string,
+  required: string,
+  capable: string[],
+): VmError {
+  return makeVmError(
+    'CAPABILITY_UNAVAILABLE',
+    `tool "${tool}" requires capability "${required}" but adapter "${adapter}" only supports: ${capable.join(', ') || 'none'}`,
+    { hint: 'no-retry', retryable: false },
+  );
+}
+
 export function vmError(code: ErrorCode, message: string, detail?: string): VmError {
   return makeVmError(code, message, {
     retryable: code === 'INTERNAL' || code === 'LOCK_CONTENTION' || code === 'HOST_CAPACITY' || code === 'QUOTA_EXCEEDED',

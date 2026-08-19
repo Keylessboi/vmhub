@@ -11,7 +11,9 @@ import { MockProxmox, type ProxmoxClient } from "../lite/proxmox.ts";
 import { RealProxmox } from "../lite/proxmox-real.ts";
 import type { NodeConfig } from "../shared/types.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
+import { resolveNodeConfigs } from "../shared/config.ts";
 
+/** Re-export from shared config (single source of truth). */
 export { resolveNodeConfigs } from "../shared/config.ts";
 
 /**

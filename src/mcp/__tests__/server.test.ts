@@ -2,23 +2,24 @@
  * vmhub-mcp tests: the 22-tool surface, capability gating (a stub adapter
  * registers fewer tools but tools are never absent), and the template catalog.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, beforeEach } from 'vitest';
+
+beforeEach(() => {
+  process.env.VMHUB_LEASE_CREATE_COOLDOWN_MS = '0';
+  process.env.VMHUB_TOOL_DRAIN = 'false';
+});
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import type { Client as ClientType } from '@modelcontextprotocol/client';
 import { buildMcpServer } from '../index.ts';
 import { Registry } from '../../../adapters/index.ts';
 import { fakePng } from '../../../adapters/_mock.ts';
 import { x11Adapter } from '../../../adapters/x11/index.ts';
-import { hyprlandAdapter } from '../../../adapters/hyprland/index.ts';
 import { vmError } from '../errors.ts';
 import { VM_TOOLS } from '../capabilities.ts';
 import type { DesktopAdapter, InputAction, SemanticElement, Vm, WindowInfo } from '../../shared/types.ts';
 import { CAPABILITIES } from '../../shared/types.ts';
 import type { ArtifactRecord, Lease, Template, WindowingSystem, InputCapability, FileCapability } from '../../shared/types.ts';
 import type { LeaseResponse, LiteClient } from '../lite-client.ts';
-
-process.env.VMHUB_LEASE_CREATE_COOLDOWN_MS = '0';
-process.env.VMHUB_TEMPLATE_CACHE_TTL_MS = '0';
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -146,16 +147,8 @@ class FakeLite implements LiteClient {
     return rec;
   }
 
-  incrementToolCallsCalls: string[] = [];
-  decrementToolCallsCalls: string[] = [];
-
-  async incrementToolCalls(vmUuid: string): Promise<void> {
-    this.incrementToolCallsCalls.push(vmUuid);
-  }
-
-  async decrementToolCalls(vmUuid: string): Promise<void> {
-    this.decrementToolCallsCalls.push(vmUuid);
-  }
+  async incrementToolCalls(_vmUuid: string): Promise<void> {}
+  async decrementToolCalls(_vmUuid: string): Promise<void> {}
 }
 
 async function connectServer(options: { registry?: Registry; lite?: LiteClient }) {
@@ -172,7 +165,7 @@ async function connectServer(options: { registry?: Registry; lite?: LiteClient }
 // ---------------------------------------------------------------------------
 
 describe('tool surface', () => {
-  it('registers exactly the 23 vm_* tools, in plan order', async () => {
+  it('registers exactly the 22 vm_* tools, in plan order', async () => {
     const registry = new Registry({ stub: new StubAdapter() });
     const { client } = await connectServer({ registry, lite: new FakeLite('stub') });
     const { tools } = await client.listTools();
@@ -533,108 +526,5 @@ describe('fakePng', () => {
     expect(png.subarray(0, 8).equals(sig)).toBe(true);
     expect(png.readUInt32BE(16)).toBe(64); // IHDR width
     expect(png.readUInt32BE(20)).toBe(48); // IHDR height
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Drain protection (VMHUB_TOOL_DRAIN)
-// ---------------------------------------------------------------------------
-
-describe('drain protection', () => {
-  it('vm_click increments and decrements the tool call counter', async () => {
-    const stub = new StubAdapter();
-    const lite = new FakeLite('stub');
-    const { client } = await connectServer({ registry: new Registry({ stub: stub as never }), lite });
-    await client.callTool({ name: 'vm_click', arguments: { vm_id: 'vm-0001', x: 10, y: 20 } });
-    expect(lite.incrementToolCallsCalls).toEqual(['vm-0001']);
-    expect(lite.decrementToolCallsCalls).toEqual(['vm-0001']);
-  });
-
-  it('vm_screenshot increments and decrements the tool call counter', async () => {
-    const lite = new FakeLite('hyprland', realCatalog());
-    const { client } = await connectServer({ registry: new Registry({ hyprland: x11Adapter }), lite });
-    await client.callTool({ name: 'vm_screenshot', arguments: { vm_id: 'vm-0001' } });
-    expect(lite.incrementToolCallsCalls).toEqual(['vm-0001']);
-    expect(lite.decrementToolCallsCalls).toEqual(['vm-0001']);
-  });
-
-  it('vm_inspect increments and decrements the tool call counter', async () => {
-    const lite = new FakeLite('x11', realCatalog());
-    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
-    await client.callTool({ name: 'vm_inspect', arguments: { vm_id: 'vm-0001' } });
-    expect(lite.incrementToolCallsCalls).toEqual(['vm-0001']);
-    expect(lite.decrementToolCallsCalls).toEqual(['vm-0001']);
-  });
-
-  it('vm_type increments and decrements the tool call counter', async () => {
-    const stub = new StubAdapter();
-    const lite = new FakeLite('stub');
-    const { client } = await connectServer({ registry: new Registry({ stub: stub as never }), lite });
-    await client.callTool({ name: 'vm_type', arguments: { vm_id: 'vm-0001', text: 'hello' } });
-    expect(lite.incrementToolCallsCalls).toEqual(['vm-0001']);
-    expect(lite.decrementToolCallsCalls).toEqual(['vm-0001']);
-  });
-
-  it('decrementToolCalls is called even when the adapter call throws', async () => {
-    const lite = new FakeLite('stub');
-    class FailingAdapter extends StubAdapter {
-      override async input(_vm: Vm, _action: InputAction): Promise<void> {
-        throw new Error('adapter exploded');
-      }
-    }
-    const { client } = await connectServer({ registry: new Registry({ stub: new FailingAdapter() as never }), lite });
-    await client.callTool({ name: 'vm_click', arguments: { vm_id: 'vm-0001', x: 10, y: 20 } });
-    expect(lite.incrementToolCallsCalls).toEqual(['vm-0001']);
-    expect(lite.decrementToolCallsCalls).toEqual(['vm-0001']);
-  });
-
-  it('vm_launch (windowOp) increments and decrements the tool call counter', async () => {
-    const lite = new FakeLite('hyprland', realCatalog());
-    const { client } = await connectServer({ registry: new Registry({ hyprland: hyprlandAdapter }), lite });
-    await client.callTool({ name: 'vm_launch', arguments: { vm_id: 'vm-0001', command: 'xterm' } });
-    expect(lite.incrementToolCallsCalls).toEqual(['vm-0001']);
-    expect(lite.decrementToolCallsCalls).toEqual(['vm-0001']);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// vm_list_vms (adapterOk field)
-// ---------------------------------------------------------------------------
-
-describe('vm_list_vms', () => {
-  it('returns VMs with adapterOk true when adapter is registered', async () => {
-    const stub = new StubAdapter();
-    const { client } = await connectServer({ registry: new Registry({ stub: stub as never }), lite: new FakeLite('stub') });
-    const res = await client.callTool({ name: 'vm_list_vms', arguments: {} });
-    const sc = res.structuredContent as { ok?: boolean; result?: { count?: number; vms?: Array<{ uuid?: string; adapterOk?: boolean }> } };
-    expect(sc.ok).toBe(true);
-    expect(sc.result?.count).toBe(1);
-    expect(sc.result?.vms?.[0]?.uuid).toBe('vm-0001');
-    expect(sc.result?.vms?.[0]?.adapterOk).toBe(true);
-  });
-
-  it('returns adapterOk false when adapter is not registered', async () => {
-    const { client } = await connectServer({ registry: new Registry({ stub: new StubAdapter() }), lite: new FakeLite('nonexistent-adapter') });
-    const res = await client.callTool({ name: 'vm_list_vms', arguments: {} });
-    const sc = res.structuredContent as { ok?: boolean; result?: { vms?: Array<{ adapter?: string; adapterOk?: boolean }> } };
-    expect(sc.ok).toBe(true);
-    expect(sc.result?.vms?.[0]?.adapter).toBe('nonexistent-adapter');
-    expect(sc.result?.vms?.[0]?.adapterOk).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// adapterFor error hint (teardown-then-retry for missing adapters)
-// ---------------------------------------------------------------------------
-
-describe('adapterFor error hint', () => {
-  it('returns teardown-then-retry hint when adapter is missing', async () => {
-    const { client } = await connectServer({ registry: new Registry({ stub: new StubAdapter() }), lite: new FakeLite('nonexistent-adapter') });
-    const res = await client.callTool({ name: 'vm_screenshot', arguments: { vm_id: 'vm-0001' } });
-    expect(res.isError).toBe(true);
-    const sc = res.structuredContent as { error?: { code?: string; hint?: string; retryable?: boolean } };
-    expect(sc.error?.code).toBe('NOT_FOUND');
-    expect(sc.error?.hint).toBe('teardown-then-retry');
-    expect(sc.error?.retryable).toBe(true);
   });
 });

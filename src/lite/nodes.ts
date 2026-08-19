@@ -13,6 +13,7 @@
  *   127.0.0.1, so no distributed lock is needed.
  */
 import type { NodeConfig, NodeStatus, Template, VmNode } from "../shared/types.ts";
+import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 import { resolveNodeConfigs } from "../shared/config.ts";
 import type { ProxmoxClient } from "./proxmox.ts";
 import { MockProxmox } from "./proxmox.ts";
