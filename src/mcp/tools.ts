@@ -1,22 +1,27 @@
 /**
- * The 22 vm_* tools. Every handler: resolve VM → adapter → capability gate →
+ * The 23 vm_* tools. Every handler: resolve VM → adapter → capability gate →
  * adapter call → typed result or typed VmError. Tools are NEVER absent;
  * unsupported capability = CAPABILITY_UNAVAILABLE error (see capabilities.ts).
  */
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import type { DesktopAdapter, Template, Vm } from '../shared/types.ts';
+import type { CapabilityId, DesktopAdapter, Template, Vm } from '../shared/types.ts';
 import type { AdapterRegistry } from '../../adapters/index.ts';
 import type { LiteClient } from './lite-client.ts';
-import { assertToolAvailable, capabilityReport, getTemplate, mergeDerivedTemplate, templateCatalog, templateFromAdapter, type VmToolName } from './capabilities.ts';
-import { errorResult, okResult, toVmError, vmError } from './errors.ts';
+import { assertToolAvailable, capabilityReport, getTemplate, mergeDerivedTemplate, templateCatalog, templateFromAdapter, TOOL_CAPABILITY, type VmToolName } from './capabilities.ts';
+import { capabilityUnavailableError, errorResult, makeVmError, okResult, toVmError, vmError } from './errors.ts';
 import { pollUntil, POLL_BOUND_MS } from './polling.ts';
 import { writeScreenshot } from './files.ts';
+
+const DRAIN_ENABLED = process.env.VMHUB_TOOL_DRAIN !== 'false';
+
+const lastLeaseCreate = new Map<string, number>();
+
+let templateCache: { templates: Template[]; timestamp: number } | null = null;
 
 export interface McpDeps {
   lite: LiteClient;
   registry: AdapterRegistry;
-  /** Base URL reported by vm_health (not the request target — deps.lite is). */
   liteUrl: string;
 }
 
@@ -32,12 +37,23 @@ export interface McpDeps {
 // degraded — never an error.
 // ---------------------------------------------------------------------------
 
+async function getCachedTemplates(deps: McpDeps): Promise<Template[]> {
+  const now = Date.now();
+  const cacheTtlMs = parseInt(process.env.VMHUB_TEMPLATE_CACHE_TTL_MS ?? '60000', 10);
+  if (templateCache && now - templateCache.timestamp < cacheTtlMs) {
+    return templateCache.templates;
+  }
+  const templates = await deps.lite.getTemplates();
+  templateCache = { templates, timestamp: now };
+  return templates;
+}
+
 async function resolveTemplate(deps: McpDeps, templateId: string): Promise<Template> {
   let real: Template[] | undefined;
   try {
-    real = await deps.lite.getTemplates();
+    real = await getCachedTemplates(deps);
   } catch {
-    real = undefined; // lite unreachable → degraded local matrix
+    real = undefined;
   }
 
   // Exact real id (a Proxmox VMID) — the authoritative path.
@@ -98,17 +114,31 @@ function sortCatalog(templates: Template[]): Template[] {
   });
 }
 
-/** Resolve a VM's adapter and enforce capability gating before any call. */
+function getCapableTemplates(deps: McpDeps, capability: CapabilityId): string[] {
+  const capable: string[] = [];
+  for (const id of deps.registry.ids()) {
+    const adapter = deps.registry.get(id);
+    if (adapter.availableTools().includes(capability)) {
+      capable.push(id);
+    }
+  }
+  return capable;
+}
+
 async function adapterFor(deps: McpDeps, vm: Vm, tool: VmToolName): Promise<DesktopAdapter> {
   if (!deps.registry.has(vm.adapter)) {
-    throw vmError(
+    throw makeVmError(
       'NOT_FOUND',
       `VM ${vm.uuid} uses adapter "${vm.adapter}", which is not registered in this vmhub-mcp build`,
-      `registered adapters: ${deps.registry.ids().join(', ')}`,
+      { hint: 'teardown-then-retry', retryable: true, detail: `registered adapters: ${deps.registry.ids().join(', ')}` },
     );
   }
   const adapter = deps.registry.get(vm.adapter);
-  assertToolAvailable(tool, adapter);
+  const required = TOOL_CAPABILITY[tool];
+  if (required && !adapter.availableTools().includes(required)) {
+    const capable = getCapableTemplates(deps, required);
+    throw capabilityUnavailableError(tool, vm.adapter, required, capable);
+  }
   return adapter;
 }
 
@@ -188,9 +218,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           const report = capabilityReport(adapter);
           return okResult('vm_capabilities', { ...report, template: getTemplate(deps.registry, id) }, start);
         }
-        // Real Proxmox VMID path: resolve from lite's live catalog and map to
-        // the adapter by OS family.
-        const real = await deps.lite.getTemplates();
+        const real = await getCachedTemplates(deps);
         const t = real.find((r) => r.id === id);
         if (!t) {
           throw vmError(
@@ -249,6 +277,30 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
     },
   );
 
+  server.registerTool(
+    'vm_list_vms',
+    {
+      title: 'List all VMs',
+      description:
+        'List all active VMs with their current status. Each VM includes an adapterOk boolean indicating whether its adapter is registered — use this to detect adapter registry mismatches before calling tools.',
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      const start = Date.now();
+      try {
+        const vms = await deps.lite.listVms();
+        const enriched = vms.map((vm) => ({
+          ...vm,
+          adapterOk: deps.registry.has(vm.adapter),
+        }));
+        return okResult('vm_list_vms', { count: enriched.length, vms: enriched }, start);
+      } catch (e) {
+        return errorResult('vm_list_vms', toVmError(e, 'vm_list_vms'), start);
+      }
+    },
+  );
+
   // ── LEASE LIFECYCLE ──────────────────────────────────────────────────────
 
   server.registerTool(
@@ -258,16 +310,28 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       description:
         'Clone a template and lease it. Idempotent on request_id: retries with the same request_id return the same lease. Waits up to 20s (chunked polling) for the VM to become ready; on timedOut:true keep calling vm_lease_status with the lease_id.',
       inputSchema: z.object({
-        template_id: z.string().describe('Template id from vm_list_templates'),
-        owner: z.string().describe('Who owns the lease (agent/session id)'),
-        request_id: z.string().describe('Idempotency key — reuse on retries'),
-        ttl_ms: z.number().int().positive().max(86_400_000).optional().describe('Lease lifetime cap in ms (default 24h)'),
+        template_id: z.string().describe('Template id from vm_list_templates (e.g. "hyprland", "windows", "2030")'),
+        owner: z.string().describe('Who owns the lease (agent/session id). Examples: "opencode", "agent-1", "claude-session-abc123"'),
+        request_id: z.string().describe('Idempotency key — reuse on retries. Any unique string, e.g. "lease-12345", "req-2026-08-18-001"'),
+        ttl_ms: z.number().int().positive().max(86_400_000).optional().describe('Lease lifetime cap in ms (default 24h). Example: 3600000 for 1 hour'),
       }),
       annotations: { destructiveHint: true },
     },
     async ({ template_id, owner, request_id, ttl_ms }) => {
       const start = Date.now();
       try {
+        const now = Date.now();
+        const lastCreate = lastLeaseCreate.get(owner) ?? 0;
+        const cooldownMs = parseInt(process.env.VMHUB_LEASE_CREATE_COOLDOWN_MS ?? '5000', 10);
+        if (now - lastCreate < cooldownMs) {
+          throw vmError(
+            'QUOTA_EXCEEDED',
+            `rate limit: owner "${owner}" must wait ${cooldownMs - (now - lastCreate)}ms between lease creates`,
+            'wait then retry, or release existing leases with vm_lease_release',
+          );
+        }
+        lastLeaseCreate.set(owner, now);
+
         const template = await resolveTemplate(deps, template_id);
         if (template.availability !== 'available') {
           throw vmError(
@@ -293,7 +357,9 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             ready,
             timedOut: outcome.timedOut,
             polls: outcome.polls,
-            hint: outcome.timedOut ? 'call vm_lease_status with this lease_id until ready' : undefined,
+            elapsedMs: outcome.elapsedMs,
+            estimatedRemainingMs: outcome.estimatedRemainingMs,
+            hint: outcome.timedOut ? `call vm_lease_status with this lease_id until ready (waited ${outcome.elapsedMs}ms, typical provisioning takes 30-60s)` : undefined,
           },
           start,
         );
@@ -329,7 +395,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         );
         return okResult(
           'vm_lease_status',
-          { vm: outcome.value.vm, lease: outcome.value.lease, ready: outcome.value.vm.status === 'ready', timedOut: outcome.timedOut, polls: outcome.polls },
+          { vm: outcome.value.vm, lease: outcome.value.lease, ready: outcome.value.vm.status === 'ready', timedOut: outcome.timedOut, polls: outcome.polls, elapsedMs: outcome.elapsedMs, estimatedRemainingMs: outcome.estimatedRemainingMs },
           start,
         );
       } catch (e) {
@@ -398,16 +464,21 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       try {
         const vm = await vmOf(deps, vm_id);
         const adapter = await adapterFor(deps, vm, 'vm_screenshot');
-        const shot = await adapter.screenshot(vm);
-        const written = await writeScreenshot(vm.uuid, shot);
-        const payload = { ...written, jpeg };
-        return {
-          content: [
-            { type: 'text' as const, text: JSON.stringify(payload, null, 2) },
-            { type: 'image' as const, data: shot.image.toString('base64'), mimeType: shot.format === 'jpg' ? ('image/jpeg' as const) : ('image/png' as const) },
-          ],
-          structuredContent: { ok: true, action: 'vm_screenshot', result: payload, ms: Date.now() - start },
-        };
+        if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
+        try {
+          const shot = await adapter.screenshot(vm);
+          const written = await writeScreenshot(vm.uuid, shot);
+          const payload = { ...written, jpeg };
+          return {
+            content: [
+              { type: 'text' as const, text: JSON.stringify(payload, null, 2) },
+              { type: 'image' as const, data: shot.image.toString('base64'), mimeType: shot.format === 'jpg' ? ('image/jpeg' as const) : ('image/png' as const) },
+            ],
+            structuredContent: { ok: true, action: 'vm_screenshot', result: payload, ms: Date.now() - start },
+          };
+        } finally {
+          if (DRAIN_ENABLED) await deps.lite.decrementToolCalls(vm.uuid);
+        }
       } catch (e) {
         return errorResult('vm_screenshot', toVmError(e, 'vm_screenshot'), start);
       }
@@ -428,8 +499,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       try {
         const vm = await vmOf(deps, vm_id);
         const adapter = await adapterFor(deps, vm, 'vm_inspect');
-        const tree = await adapter.inspect(vm);
-        return okResult('vm_inspect', { semantic: adapter.capability.semantic, tree }, start);
+        if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
+        try {
+          const tree = await adapter.inspect(vm);
+          return okResult('vm_inspect', { semantic: adapter.capability.semantic, tree }, start);
+        } finally {
+          if (DRAIN_ENABLED) await deps.lite.decrementToolCalls(vm.uuid);
+        }
       } catch (e) {
         return errorResult('vm_inspect', toVmError(e, 'vm_inspect'), start);
       }
@@ -449,9 +525,14 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       try {
         const vm = await vmOf(deps, vm_id);
         const adapter = await adapterFor(deps, vm, 'vm_list_windows');
-        const windows = await adapter.listWindows(vm);
-        const list = filter ? windows.filter((w) => w.title.toLowerCase().includes(filter.toLowerCase()) || (w.className ?? '').toLowerCase().includes(filter.toLowerCase())) : windows;
-        return okResult('vm_list_windows', { count: list.length, windows: list }, start);
+        if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
+        try {
+          const windows = await adapter.listWindows(vm);
+          const list = filter ? windows.filter((w) => w.title.toLowerCase().includes(filter.toLowerCase()) || (w.className ?? '').toLowerCase().includes(filter.toLowerCase())) : windows;
+          return okResult('vm_list_windows', { count: list.length, windows: list }, start);
+        } finally {
+          if (DRAIN_ENABLED) await deps.lite.decrementToolCalls(vm.uuid);
+        }
       } catch (e) {
         return errorResult('vm_list_windows', toVmError(e, 'vm_list_windows'), start);
       }
@@ -478,8 +559,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       try {
         const vm = await vmOf(deps, vm_id);
         const adapter = await adapterFor(deps, vm, 'vm_click');
-        await adapter.input(vm, { kind: 'click', x, y, button });
-        return okResult('vm_click', { clicked: true, x, y, button }, start);
+        if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
+        try {
+          await adapter.input(vm, { kind: 'click', x, y, button });
+          return okResult('vm_click', { clicked: true, x, y, button }, start);
+        } finally {
+          if (DRAIN_ENABLED) await deps.lite.decrementToolCalls(vm.uuid);
+        }
       } catch (e) {
         return errorResult('vm_click', toVmError(e, 'vm_click'), start);
       }
@@ -499,8 +585,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       try {
         const vm = await vmOf(deps, vm_id);
         const adapter = await adapterFor(deps, vm, 'vm_type');
-        await adapter.input(vm, { kind: 'type', text });
-        return okResult('vm_type', { typed: text.length }, start);
+        if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
+        try {
+          await adapter.input(vm, { kind: 'type', text });
+          return okResult('vm_type', { typed: text.length }, start);
+        } finally {
+          if (DRAIN_ENABLED) await deps.lite.decrementToolCalls(vm.uuid);
+        }
       } catch (e) {
         return errorResult('vm_type', toVmError(e, 'vm_type'), start);
       }
@@ -520,8 +611,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       try {
         const vm = await vmOf(deps, vm_id);
         const adapter = await adapterFor(deps, vm, 'vm_key');
-        await adapter.input(vm, { kind: 'key', chord });
-        return okResult('vm_key', { chord }, start);
+        if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
+        try {
+          await adapter.input(vm, { kind: 'key', chord });
+          return okResult('vm_key', { chord }, start);
+        } finally {
+          if (DRAIN_ENABLED) await deps.lite.decrementToolCalls(vm.uuid);
+        }
       } catch (e) {
         return errorResult('vm_key', toVmError(e, 'vm_key'), start);
       }
@@ -545,8 +641,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         if (!adapter.dispatch) {
           throw vmError('CAPABILITY_UNAVAILABLE', `adapter "${adapter.id}" has no dispatch path for paste`);
         }
-        const result = await adapter.dispatch(vm, 'paste', { text });
-        return okResult('vm_paste', { pasted: true, chars: text.length, detail: result }, start);
+        if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
+        try {
+          const result = await adapter.dispatch(vm, 'paste', { text });
+          return okResult('vm_paste', { pasted: true, chars: text.length, detail: result }, start);
+        } finally {
+          if (DRAIN_ENABLED) await deps.lite.decrementToolCalls(vm.uuid);
+        }
       } catch (e) {
         return errorResult('vm_paste', toVmError(e, 'vm_paste'), start);
       }
@@ -573,8 +674,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       try {
         const vm = await vmOf(deps, vm_id);
         const adapter = await adapterFor(deps, vm, 'vm_drag');
-        await adapter.input(vm, { kind: 'drag', from: { x: from_x, y: from_y }, to: { x: to_x, y: to_y } });
-        return okResult('vm_drag', { dragged: true, from: [from_x, from_y], to: [to_x, to_y] }, start);
+        if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
+        try {
+          await adapter.input(vm, { kind: 'drag', from: { x: from_x, y: from_y }, to: { x: to_x, y: to_y } });
+          return okResult('vm_drag', { dragged: true, from: [from_x, from_y], to: [to_x, to_y] }, start);
+        } finally {
+          if (DRAIN_ENABLED) await deps.lite.decrementToolCalls(vm.uuid);
+        }
       } catch (e) {
         return errorResult('vm_drag', toVmError(e, 'vm_drag'), start);
       }
@@ -592,9 +698,14 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       if (!adapter.dispatch) {
         throw vmError('CAPABILITY_UNAVAILABLE', `adapter "${adapter.id}" does not implement dispatch (needed by ${tool})`);
       }
-      const result = await adapter.dispatch(vm, verb, args);
-      const { vm_id: _dropped, ...rest } = args;
-      return okResult(tool, { ...rest, detail: result }, start);
+      if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
+      try {
+        const result = await adapter.dispatch(vm, verb, args);
+        const { vm_id: _dropped, ...rest } = args;
+        return okResult(tool, { ...rest, detail: result }, start);
+      } finally {
+        if (DRAIN_ENABLED) await deps.lite.decrementToolCalls(vm.uuid);
+      }
     } catch (e) {
       return errorResult(tool, toVmError(e, tool), start);
     }
@@ -687,8 +798,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         if (!adapter.putFile) {
           throw vmError('CAPABILITY_UNAVAILABLE', `adapter "${adapter.id}" has no put_file transport (files: ${adapter.capability.files.join(', ') || 'none'})`);
         }
-        await adapter.putFile(vm, local_path, remote_path);
-        return okResult('vm_put_file', { transferred: true, remote_path }, start);
+        if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
+        try {
+          await adapter.putFile(vm, local_path, remote_path);
+          return okResult('vm_put_file', { transferred: true, remote_path }, start);
+        } finally {
+          if (DRAIN_ENABLED) await deps.lite.decrementToolCalls(vm.uuid);
+        }
       } catch (e) {
         return errorResult('vm_put_file', toVmError(e, 'vm_put_file'), start);
       }
@@ -715,8 +831,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         if (!adapter.getFile) {
           throw vmError('CAPABILITY_UNAVAILABLE', `adapter "${adapter.id}" has no get_file transport (files: ${adapter.capability.files.join(', ') || 'none'})`);
         }
-        await adapter.getFile(vm, remote_path, local_path);
-        return okResult('vm_get_file', { transferred: true, local_path }, start);
+        if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
+        try {
+          await adapter.getFile(vm, remote_path, local_path);
+          return okResult('vm_get_file', { transferred: true, local_path }, start);
+        } finally {
+          if (DRAIN_ENABLED) await deps.lite.decrementToolCalls(vm.uuid);
+        }
       } catch (e) {
         return errorResult('vm_get_file', toVmError(e, 'vm_get_file'), start);
       }
@@ -743,8 +864,13 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         if (!adapter.cloneRepo) {
           throw vmError('CAPABILITY_UNAVAILABLE', `adapter "${adapter.id}" has no clone_repo path`);
         }
-        await adapter.cloneRepo(vm, repo_url, dest_path);
-        return okResult('vm_clone_repo', { cloned: true, repo_url, dest_path }, start);
+        if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
+        try {
+          await adapter.cloneRepo(vm, repo_url, dest_path);
+          return okResult('vm_clone_repo', { cloned: true, repo_url, dest_path }, start);
+        } finally {
+          if (DRAIN_ENABLED) await deps.lite.decrementToolCalls(vm.uuid);
+        }
       } catch (e) {
         return errorResult('vm_clone_repo', toVmError(e, 'vm_clone_repo'), start);
       }

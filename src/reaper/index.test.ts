@@ -24,6 +24,7 @@ import {
   createClientForNode,
   defaultNodeConfig,
   findVmByIdentity,
+  hasActiveToolCalls,
   isDraining,
   isLeaseExpired,
   resolveNodeConfigs,
@@ -95,8 +96,8 @@ async function seedLease(fx: Fixture, seed: LeaseSeed, vmid = 1000): Promise<voi
   const { vm, lease, artifacts = [] } = seed;
   conn
     .prepare(
-      `INSERT INTO vms (uuid, vmid, nodeId, templateId, adapter, capabilities, proxmoxTag, namePrefix, status, sshPort, scratchDir, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO vms (uuid, vmid, nodeId, templateId, adapter, capabilities, proxmoxTag, namePrefix, status, sshPort, scratchDir, createdAt, activeToolCalls)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       vm.uuid,
@@ -111,6 +112,7 @@ async function seedLease(fx: Fixture, seed: LeaseSeed, vmid = 1000): Promise<voi
       vm.sshPort ?? null,
       vm.scratchDir ?? null,
       vm.createdAt,
+      (vm as Record<string, unknown>).activeToolCalls ?? 0,
     );
   conn
     .prepare(
@@ -218,6 +220,26 @@ describe("isDraining", () => {
   });
 });
 
+describe("hasActiveToolCalls", () => {
+  it("returns true when activeToolCalls > 0", () => {
+    const fx = { uuid: "x", namePrefix: "p", proxmoxTag: "t" } as Fixture;
+    const vm = makeVm(fx, { activeToolCalls: 3 } as Partial<Vm>);
+    expect(hasActiveToolCalls(vm)).toBe(true);
+  });
+
+  it("returns false when activeToolCalls is 0", () => {
+    const fx = { uuid: "x", namePrefix: "p", proxmoxTag: "t" } as Fixture;
+    const vm = makeVm(fx, { activeToolCalls: 0 } as Partial<Vm>);
+    expect(hasActiveToolCalls(vm)).toBe(false);
+  });
+
+  it("returns false when activeToolCalls is undefined", () => {
+    const fx = { uuid: "x", namePrefix: "p", proxmoxTag: "t" } as Fixture;
+    const vm = makeVm(fx);
+    expect(hasActiveToolCalls(vm)).toBe(false);
+  });
+});
+
 describe("findVmByIdentity", () => {
   it("matches tag AND name prefix — never a bare VMID", async () => {
     const proxmox = new MockProxmox();
@@ -227,14 +249,17 @@ describe("findVmByIdentity", () => {
     await proxmox.createVm({ templateId: "2100", name: "win-u-1", proxmoxTag: "vmhub-win-u-1" });
 
     const found = await findVmByIdentity(proxmox, fx.proxmoxTag, fx.namePrefix);
-    expect(found?.name).toBe("win-u-1");
+    expect(found.vm?.name).toBe("win-u-1");
   });
 
-  it("throws on an identity collision instead of guessing", async () => {
+  it("returns collision flag instead of guessing on identity collision", async () => {
     const proxmox = new MockProxmox();
     await proxmox.createVm({ templateId: "2100", name: "win-u-1", proxmoxTag: "vmhub-win-u-1" });
     await proxmox.createVm({ templateId: "2100", name: "win-u-1", proxmoxTag: "vmhub-win-u-1" });
-    await expect(findVmByIdentity(proxmox, "vmhub-win-u-1", "win")).rejects.toThrow(/collision/);
+    const result = await findVmByIdentity(proxmox, "vmhub-win-u-1", "win");
+    expect(result.collision).toBe(true);
+    expect(result.matches).toHaveLength(2);
+    expect(result.vm).toBeUndefined();
   });
 
   it("matches the identity tag via the tags[] array (real API shape)", async () => {
@@ -242,7 +267,7 @@ describe("findVmByIdentity", () => {
     // Real Proxmox carries vmhub-* among many tags; proxmoxTag field may be absent.
     await proxmox.createVm({ templateId: "2100", name: "win-u-9", proxmoxTag: "vmhub-win-u-9" });
     const found = await findVmByIdentity(proxmox, "vmhub-win-u-9", "win");
-    expect(found?.vmid).toBe(1000);
+    expect(found.vm?.vmid).toBe(1000);
   });
 });
 
@@ -416,6 +441,24 @@ describe("reaper sweep", () => {
     expect(report.draining).toBe(1);
     expect(report.destroyed).toBe(0);
     expect((await proxmox.listVms()).length).toBe(1); // VM survives
+    expect(db.listLeasesWithVm().length).toBe(1);
+  });
+
+  it("refuses to destroy while activeToolCalls > 0 (tool drain protection)", async () => {
+    const proxmox = new MockProxmox();
+    await seedProxmoxVm(proxmox, fx);
+    const now = Date.now();
+    await seedLease(fx, {
+      vm: makeVm(fx, { activeToolCalls: 2 } as Partial<Vm>),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+    });
+
+    db = await openReaperDb(fx.dbPath);
+    const report = await sweep(db, proxmox, { artifactDir: fx.artifactDir, now: () => now });
+
+    expect(report.draining).toBe(1);
+    expect(report.destroyed).toBe(0);
+    expect((await proxmox.listVms()).length).toBe(1);
     expect(db.listLeasesWithVm().length).toBe(1);
   });
 
@@ -980,5 +1023,83 @@ describe("node registry resolution", () => {
     expect(client).toBeInstanceOf(RealProxmox);
     const opts = (client as unknown as { opts: { nodeId?: string } }).opts;
     expect(opts.nodeId).toBe("nodeb");
+  });
+});
+
+describe("identity collision quarantine", () => {
+  let fx: Fixture;
+  let db: ReaperDb | undefined;
+
+  const savedEnv = process.env.VMHUB_COLLISION_QUARANTINE;
+
+  beforeEach(async () => {
+    fx = await makeFixture();
+    process.env.VMHUB_COLLISION_QUARANTINE = "true";
+  });
+
+  afterEach(async () => {
+    try {
+      await db?.close();
+    } catch {}
+    db = undefined;
+    if (savedEnv === undefined) delete process.env.VMHUB_COLLISION_QUARANTINE;
+    else process.env.VMHUB_COLLISION_QUARANTINE = savedEnv;
+    await rm(fx.dir, { recursive: true, force: true });
+  });
+
+  it("quarantines both leases when two VMs share identical tags, destroys neither", async () => {
+    const uuidB = "a1b2c3d4-0000-4000-8000-000000000002";
+    const sharedTag = "vmhub-win-shared";
+    const sharedPrefix = "win";
+
+    const proxmox = new MockProxmox();
+    await proxmox.createVm({ templateId: "2100", name: "win-shared", proxmoxTag: sharedTag });
+    await proxmox.createVm({ templateId: "2100", name: "win-shared", proxmoxTag: sharedTag });
+
+    const now = Date.now();
+    await seedLease(fx, {
+      vm: makeVm(fx, { proxmoxTag: sharedTag, namePrefix: sharedPrefix }),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+    }, 1000);
+    await seedLease(fx, {
+      vm: makeVm(fx, { uuid: uuidB, proxmoxTag: sharedTag, namePrefix: sharedPrefix }),
+      lease: makeLease(fx, { vmId: uuidB, requestId: "req-b", expiresAt: now - 1000 }),
+    }, 1001);
+
+    db = await openReaperDb(fx.dbPath);
+    const report = await sweep(db, proxmox, { artifactDir: fx.artifactDir, now: () => now });
+
+    expect(report.destroyed).toBe(0);
+    expect(report.errors).toEqual([]);
+    expect(report.alerts.length).toBeGreaterThanOrEqual(1);
+    expect(report.alerts.some((a) => a.includes("quarantined"))).toBe(true);
+
+    // Both VMs survive in Proxmox (quarantine = do NOT destroy).
+    expect((await proxmox.listVms()).length).toBe(2);
+
+    // Both leases are quarantined in the DB (no longer active).
+    const active = db.listLeasesWithVm();
+    expect(active).toHaveLength(0);
+  });
+
+  it("feature flag VMHUB_COLLISION_QUARANTINE=false falls back to error (legacy throw)", async () => {
+    process.env.VMHUB_COLLISION_QUARANTINE = "false";
+    const proxmox = new MockProxmox();
+    await proxmox.createVm({ templateId: "2100", name: "win-u-1", proxmoxTag: "vmhub-win-u-1" });
+    await proxmox.createVm({ templateId: "2100", name: "win-u-1", proxmoxTag: "vmhub-win-u-1" });
+
+    const now = Date.now();
+    await seedLease(fx, {
+      vm: makeVm(fx, { proxmoxTag: "vmhub-win-u-1", namePrefix: "win" }),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+    });
+
+    db = await openReaperDb(fx.dbPath);
+    const report = await sweep(db, proxmox, { artifactDir: fx.artifactDir, now: () => now });
+
+    expect(report.destroyed).toBe(0);
+    expect(report.errors).toHaveLength(1);
+    expect(report.errors[0]?.message).toMatch(/collision/);
+    expect((await proxmox.listVms()).length).toBe(2);
   });
 });

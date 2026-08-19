@@ -129,6 +129,11 @@ async function sweepNode(
         report.draining++;
         deferred++;
         break;
+      case "quarantined":
+        report.alerts.push(
+          `identity collision: quarantined leases [${result.vmIds.join(", ")}]`,
+        );
+        break;
       case "error":
         deferred++;
         report.errors.push({ vmId: entry.vm.uuid, message: result.message });

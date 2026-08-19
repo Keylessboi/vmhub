@@ -96,7 +96,8 @@ export type VmStatus =
   | "busy"
   | "draining"
   | "error"
-  | "destroyed";
+  | "destroyed"
+  | "quarantined";
 
 // ---------------------------------------------------------------------------
 // Nodes (multi-node)
@@ -195,6 +196,8 @@ export interface Vm {
   /** Host-side lease-scratch dir for artifacts. */
   scratchDir?: string;
   createdAt: number;
+  /** Number of in-progress MCP tool calls on this VM (drain protection). */
+  activeToolCalls?: number;
 }
 
 export interface Lease {
@@ -252,10 +255,8 @@ export type ErrorCode =
 export interface VmError {
   code: ErrorCode;
   message: string;
-  /** True when the agent should retry (with backoff or after teardown). */
   retryable: boolean;
-  /** Action hint: teardown-then-retry | wait-then-retry | one-retry-then-report | retry-with-backoff. */
-  hint: "teardown-then-retry" | "wait-then-retry" | "one-retry-then-report" | "retry-with-backoff" | "no-retry";
+  hint: string;
   detail?: string;
 }
 
@@ -297,6 +298,7 @@ export interface ArtifactRecord {
   sizeBytes: number;
   /** Whether the reaper may delete it (false while in-flight vm_get_file). */
   inFlight: boolean;
+  inFlightAt?: number;
   createdAt: number;
 }
 

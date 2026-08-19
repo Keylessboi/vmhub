@@ -13,11 +13,12 @@ import { CAPABILITIES } from '../shared/types.ts';
 import type { AdapterRegistry } from '../../adapters/index.ts';
 import { vmError } from './errors.ts';
 
-/** The 22 vm_* tools, in registration order (also the doc order). */
+/** The 23 vm_* tools, in registration order (also the doc order). */
 export const VM_TOOLS = [
   'vm_list_templates',
   'vm_capabilities',
   'vm_health',
+  'vm_list_vms',
   'vm_lease_create',
   'vm_lease_status',
   'vm_lease_renew',
@@ -46,6 +47,7 @@ export const TOOL_CAPABILITY: Record<VmToolName, CapabilityId | null> = {
   vm_list_templates: null,
   vm_capabilities: null,
   vm_health: null,
+  vm_list_vms: null,
   vm_lease_create: null,
   vm_lease_status: null,
   vm_lease_renew: null,

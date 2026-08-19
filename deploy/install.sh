@@ -24,6 +24,24 @@ DATADIR="/srv/vmhub"
 [ -d "$REPO" ] || { echo "repo not found: $REPO"; exit 1; }
 [ "$(id -u)" -eq 0 ] || { echo "run as root (sudo)"; exit 1; }
 
+# --- Doppler check ---
+# install.sh expects secrets injected by Doppler. Without it, env vars are
+# blank and the server fails later with a confusing "unauthorized" error.
+# Run via: doppler run --project proxmox --config prd -- ./deploy/install.sh
+if [ -z "${DOPPLER_PROJECT:-}" ] && [ -z "${PVE_TOKEN:-}" ]; then
+  echo "ERROR: No secrets found. install.sh requires Doppler to inject credentials."
+  echo
+  echo "  Option A (recommended):"
+  echo "    doppler login"
+  echo "    doppler run --project proxmox --config prd -- ./deploy/install.sh"
+  echo
+  echo "  Option B (manual):"
+  echo "    Export PVE_HOST, PVE_TOKEN_ID, and PVE_TOKEN before running."
+  echo "    See .env.example for the full variable list."
+  echo
+  exit 1
+fi
+
 echo "==> build binaries"
 cd "$REPO"
 bun run build:lite

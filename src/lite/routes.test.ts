@@ -203,7 +203,7 @@ describe("POST /v1/leases", () => {
     expect(status).toBe(507);
     expect(json.error.code).toBe("DISK_FULL");
     expect(json.error.retryable).toBe(true);
-    expect(json.error.hint).toBe("teardown-then-retry");
+    expect(json.error.hint).toBe("release old leases with vm_lease_release, then retry vm_lease_create");
     expect(c.db.listVms()).toHaveLength(0);
   });
 
@@ -235,8 +235,24 @@ describe("POST /v1/leases", () => {
     expect(status).toBe(503);
     expect(json.error.code).toBe("PROVISION_FAILED");
     expect(json.error.retryable).toBe(false);
-    expect(json.error.hint).toBe("teardown-then-retry");
+    expect(json.error.hint).toBe("release the lease with vm_lease_release, then create a new one");
     expect(json.error.detail).toBe("Error: VM not found on Proxmox");
+    expect(c.db.listVms()).toHaveLength(0);
+    expect(await c.proxmox.listVms()).toHaveLength(0);
+  });
+
+  test("probe failure in single-node marks template unavailable and rolls back", async () => {
+    const c = makeCtx();
+    c.proxmox.probeCapabilities = async () => ({
+      available: false,
+      reason: "missing: ffmpeg",
+    });
+    const h = handler(c);
+    const { status, json } = await createLease(h, "probe-fail-single");
+    expect(status).toBe(409);
+    expect(json.error.code).toBe("CAPABILITY_UNAVAILABLE");
+    expect(json.error.detail).toBe("missing: ffmpeg");
+    expect(json.error.retryable).toBe(false);
     expect(c.db.listVms()).toHaveLength(0);
     expect(await c.proxmox.listVms()).toHaveLength(0);
   });
@@ -696,5 +712,253 @@ describe("multi-node lease routing", () => {
     expect(db.getLease(vmId)?.status).toBe("released");
     const nodeA = nodes.find((n) => n.config.id === "nodeA")!;
     expect(await nodeA.client.listVms()).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Race condition: locked create + rollback
+// ---------------------------------------------------------------------------
+
+describe("locked lease create (race condition fix)", () => {
+  test("concurrent creates respect RAM budget (only N succeed where N = floor(headroom/ramMb))", async () => {
+    // One node with 16384 MB headroom; hyprland template (2070) uses 8192 MB → max 2 leases.
+    const nodes = [fakeNode("nodeA", {}, 16384)];
+    const { ctx } = makeMultiNodeCtx(nodes);
+    const h = createLiteHandler(ctx);
+
+    const N = 10;
+    const results = await Promise.allSettled(
+      Array.from({ length: N }, (_, i) => createLease(h, `conc-${i}`)),
+    );
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<{
+      status: number;
+      json: any;
+    }>[];
+    const successes = fulfilled.filter((r) => r.value.status === 201);
+
+    expect(successes.length).toBe(2);
+    for (const s of successes) {
+      expect(s.value.json.vm.nodeId).toBe("nodeA");
+    }
+    const nodeA = nodes.find((n) => n.config.id === "nodeA")!;
+    expect(await nodeA.client.listVms()).toHaveLength(2);
+  });
+
+  test("probe failure marks template unavailable and rolls back VM", async () => {
+    const nodes = [fakeNode("nodeA")];
+    const { ctx, db } = makeMultiNodeCtx(nodes);
+    const h = createLiteHandler(ctx);
+    const nodeA = nodes.find((n) => n.config.id === "nodeA")!;
+
+    const originalProbe = nodeA.client.probeCapabilities.bind(nodeA.client);
+    nodeA.client.probeCapabilities = async () => ({
+      available: false,
+      reason: "missing: hyprctl, grim",
+    });
+
+    const { status, json } = await createLease(h, "probe-fail");
+    expect(status).toBe(409);
+    expect(json.error.code).toBe("CAPABILITY_UNAVAILABLE");
+    expect(json.error.detail).toBe("missing: hyprctl, grim");
+    expect(json.error.retryable).toBe(false);
+    expect(db.listVms()).toHaveLength(0);
+    expect(await nodeA.client.listVms()).toHaveLength(0);
+  });
+
+  test("concurrent creates with identical requestId return the same lease (idempotent)", async () => {
+    // 32 GB headroom, 8 GB per VM → up to 4 concurrent creates, but only first wins the requestId.
+    const nodes = [fakeNode("nodeA", {}, 32768)];
+    const { ctx } = makeMultiNodeCtx(nodes);
+    const h = createLiteHandler(ctx);
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 5 }, (_, i) => createLease(h, "same-id")),
+    );
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<{
+      status: number;
+      json: any;
+    }>[];
+    const created = fulfilled.filter((r) => r.value.status === 201);
+    const replayed = fulfilled.filter((r) => r.value.status === 200);
+
+    expect(created.length).toBe(1);
+    expect(replayed.length).toBeGreaterThanOrEqual(1);
+    const firstCreated = created[0]!;
+    for (const r of replayed) {
+      expect(r.value.json.lease.vmId).toBe(firstCreated.value.json.lease.vmId);
+    }
+  });
+
+  test("startVm failure rolls back: DB row deleted + Proxmox VM destroyed", async () => {
+    const nodes = [fakeNode("nodeA")];
+    const { ctx, db } = makeMultiNodeCtx(nodes);
+    const h = createLiteHandler(ctx);
+    const nodeA = nodes.find((n) => n.config.id === "nodeA")!;
+
+    let startCallCount = 0;
+    const originalStart = nodeA.client.startVm.bind(nodeA.client);
+    nodeA.client.startVm = async (vmid: number) => {
+      startCallCount++;
+      throw new Error("simulated startVm failure");
+    };
+
+    const { status, json } = await createLease(h, "fail-start");
+    expect(status).toBe(500);
+    expect(json.error).toBeDefined();
+    expect(db.listVms()).toHaveLength(0);
+    expect(await nodeA.client.listVms()).toHaveLength(0);
+  });
+
+  test("getVm verification failure rolls back: DB row deleted + Proxmox VM destroyed", async () => {
+    const c = makeCtx();
+    const h = handler(c);
+
+    const originalGetVm = c.proxmox.getVm.bind(c.proxmox);
+    c.proxmox.getVm = async (vmid: number) => {
+      throw new Error("simulated getVm verification failure");
+    };
+
+    const { status, json } = await createLease(h, "fail-verify");
+    expect(status).toBe(503);
+    expect(json.error.code).toBe("PROVISION_FAILED");
+    expect(c.db.listVms()).toHaveLength(0);
+  });
+
+  test("single-node locked create respects PerNodeLock (concurrent serial creation)", async () => {
+    const c = makeCtx();
+    const h = handler(c);
+
+    let activeVmids = new Set<number>();
+    const originalCreateVm = c.proxmox.createVm.bind(c.proxmox);
+    c.proxmox.createVm = async (...args: Parameters<typeof originalCreateVm>) => {
+      const result = await originalCreateVm(...args);
+      activeVmids.add(result.vmid);
+      return result;
+    };
+
+    const N = 5;
+    const results = await Promise.allSettled(
+      Array.from({ length: N }, (_, i) => createLease(h, `single-${i}`)),
+    );
+
+    const successes = results.filter(
+      (r): r is PromiseFulfilledResult<{ status: number; json: any }> =>
+        r.status === "fulfilled" && r.value.status === 201,
+    );
+    expect(successes.length).toBe(N);
+    expect(c.db.listVms()).toHaveLength(N);
+  });
+
+  test("feature flag VMHUB_LOCKED_CREATE=false disables the lock", async () => {
+    process.env.VMHUB_LOCKED_CREATE = "false";
+    try {
+      const nodes = [fakeNode("nodeA")];
+      const { ctx } = makeMultiNodeCtx(nodes);
+      const h = createLiteHandler(ctx);
+
+      const { status } = await createLease(h, "flag-off");
+      expect(status).toBe(201);
+    } finally {
+      delete process.env.VMHUB_LOCKED_CREATE;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Provisioning status (issue #26)
+// ---------------------------------------------------------------------------
+
+describe("provisioning status (VMHUB_PROVISIONING_STATUS)", () => {
+  test("single-node: initial status is 'provisioning' when flag is on (default)", async () => {
+    const c = makeCtx();
+    const h = handler(c);
+    const { status, json } = await createLease(h, "prov-1");
+    expect(status).toBe(201);
+    expect(json.vm.status).toBe("ready");
+    expect(c.db.getVm(json.lease.vmId)!.status).toBe("ready");
+  });
+
+  test("single-node: getVm poll loop transitions VM from provisioning to ready", async () => {
+    const c = makeCtx();
+    const h = handler(c);
+    let getVmCallCount = 0;
+    const originalGetVm = c.proxmox.getVm.bind(c.proxmox);
+
+    c.proxmox.getVm = async (vmid: number) => {
+      getVmCallCount++;
+      const pvm = await originalGetVm(vmid);
+      if (getVmCallCount === 1) {
+        return { ...pvm, status: "provisioning" as const };
+      }
+      return { ...pvm, status: "running" as const };
+    };
+
+    const { status, json } = await createLease(h, "poll-1");
+    expect(status).toBe(201);
+    expect(json.vm.status).toBe("ready");
+    expect(getVmCallCount).toBe(2);
+  });
+
+  test("single-node: feature flag off uses legacy 'starting' status and skips poll", async () => {
+    process.env.VMHUB_PROVISIONING_STATUS = "false";
+    try {
+      const c = makeCtx();
+      const h = handler(c);
+      let getVmCallCount = 0;
+      const originalGetVm = c.proxmox.getVm.bind(c.proxmox);
+
+      c.proxmox.getVm = async (vmid: number) => {
+        getVmCallCount++;
+        return originalGetVm(vmid);
+      };
+
+      const { status, json } = await createLease(h, "legacy-1");
+      expect(status).toBe(201);
+      expect(json.vm.status).toBe("ready");
+      expect(getVmCallCount).toBe(1);
+    } finally {
+      delete process.env.VMHUB_PROVISIONING_STATUS;
+    }
+  });
+
+  test("multi-node locked: initial status is 'provisioning' and transitions to ready", async () => {
+    const nodes = [fakeNode("nodeA")];
+    const { ctx } = makeMultiNodeCtx(nodes);
+    const h = createLiteHandler(ctx);
+    const nodeA = nodes.find((n) => n.config.id === "nodeA")!;
+
+    let getVmCallCount = 0;
+    const originalGetVm = nodeA.client.getVm.bind(nodeA.client);
+
+    nodeA.client.getVm = async (vmid: number) => {
+      getVmCallCount++;
+      const pvm = await originalGetVm(vmid);
+      if (getVmCallCount === 1) {
+        return { ...pvm, status: "provisioning" as const };
+      }
+      return { ...pvm, status: "running" as const };
+    };
+
+    const { status, json } = await createLease(h, "mprov-1");
+    expect(status).toBe(201);
+    expect(json.vm.status).toBe("ready");
+    expect(getVmCallCount).toBe(2);
+  });
+
+  test("single-node: getVm poll failure rolls back VM", async () => {
+    const c = makeCtx();
+    const h = handler(c);
+
+    c.proxmox.getVm = async () => {
+      throw new Error("simulated getVm failure during poll");
+    };
+
+    const { status, json } = await createLease(h, "poll-fail");
+    expect(status).toBe(503);
+    expect(json.error.code).toBe("PROVISION_FAILED");
+    expect(c.db.listVms()).toHaveLength(0);
+    expect(await c.proxmox.listVms()).toHaveLength(0);
   });
 });

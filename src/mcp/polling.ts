@@ -10,10 +10,10 @@ export const POLL_INTERVAL_MS = 500;
 
 export interface PollOutcome<T> {
   value: T;
-  /** true when the bound was hit without isDone returning true. */
   timedOut: boolean;
-  /** Number of polls performed (audit). */
   polls: number;
+  elapsedMs: number;
+  estimatedRemainingMs: number;
 }
 
 /**
@@ -29,13 +29,16 @@ export async function pollUntil<T>(
   const timeoutMs = Math.min(Math.max(opts.timeoutMs ?? POLL_BOUND_MS, 0), POLL_BOUND_MS);
   const intervalMs = opts.intervalMs ?? POLL_INTERVAL_MS;
   const deadline = Date.now() + timeoutMs;
+  const startTime = Date.now();
   let polls = 0;
 
   for (;;) {
     const value = await fn();
     polls += 1;
+    const elapsedMs = Date.now() - startTime;
+    const remainingMs = Math.max(0, deadline - Date.now());
     if (isDone(value) || Date.now() >= deadline) {
-      return { value, timedOut: !isDone(value), polls };
+      return { value, timedOut: !isDone(value), polls, elapsedMs, estimatedRemainingMs: 0 };
     }
     await sleep(Math.min(intervalMs, Math.max(deadline - Date.now(), 1)));
   }

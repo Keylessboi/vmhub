@@ -40,6 +40,10 @@ export interface LiteClient {
   createArtifact(input: { leaseId: string; hostPath: string; sizeBytes: number }): Promise<ArtifactRecord>;
   /** GET /v1/artifacts/{id}. */
   getArtifact(id: string): Promise<ArtifactRecord>;
+  /** POST /v1/vms/{uuid}/tool-calls/increment — drain protection. */
+  incrementToolCalls(vmUuid: string): Promise<void>;
+  /** POST /v1/vms/{uuid}/tool-calls/decrement — drain protection. */
+  decrementToolCalls(vmUuid: string): Promise<void>;
 }
 
 export class HttpLiteClient implements LiteClient {
@@ -100,6 +104,14 @@ export class HttpLiteClient implements LiteClient {
 
   getArtifact(id: string): Promise<ArtifactRecord> {
     return this.request('GET', `/v1/artifacts/${encodeURIComponent(id)}`);
+  }
+
+  async incrementToolCalls(vmUuid: string): Promise<void> {
+    await this.request('POST', `/v1/vms/${encodeURIComponent(vmUuid)}/tool-calls/increment`);
+  }
+
+  async decrementToolCalls(vmUuid: string): Promise<void> {
+    await this.request('POST', `/v1/vms/${encodeURIComponent(vmUuid)}/tool-calls/decrement`);
   }
 
   private async request<T>(

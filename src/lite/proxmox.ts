@@ -68,6 +68,12 @@ export interface ProxmoxClient {
   diskFreeBytes(): Promise<number>;
   /** Host used disk bytes. */
   diskUsedBytes(): Promise<number>;
+  /**
+   * Probe a running VM for required capability binaries (ffmpeg, hyprctl, etc.).
+   * Returns available=true when all expected binaries are present, or
+   * available=false with a reason listing what is missing.
+   */
+  probeCapabilities(vmid: number): Promise<{ available: boolean; reason?: string }>;
   /** Release any held resources. Safe to call once; mock is a no-op. */
   close?(): Promise<void>;
 }
@@ -264,6 +270,10 @@ export class MockProxmox implements ProxmoxClient {
     } catch {
       return 0;
     }
+  }
+
+  async probeCapabilities(_vmid: number): Promise<{ available: boolean; reason?: string }> {
+    return { available: true };
   }
 
   async close(): Promise<void> {

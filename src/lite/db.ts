@@ -96,6 +96,13 @@ export class LiteDb {
     if (!cols.some((c) => c.name === "nodeId")) {
       this.db.exec(`ALTER TABLE vms ADD COLUMN nodeId TEXT NOT NULL DEFAULT '${DEFAULT_NODE_ID}';`);
     }
+    if (!cols.some((c) => c.name === "activeToolCalls")) {
+      this.db.exec("ALTER TABLE vms ADD COLUMN activeToolCalls INTEGER NOT NULL DEFAULT 0;");
+    }
+    const artifactCols = this.db.prepare("PRAGMA table_info(artifacts)").all() as { name: string }[];
+    if (!artifactCols.some((c) => c.name === "inFlightAt")) {
+      this.db.exec("ALTER TABLE artifacts ADD COLUMN inFlightAt INTEGER;");
+    }
   }
 
   close(): void {
@@ -110,7 +117,7 @@ export class LiteDb {
     this.db
       .prepare(
         `INSERT INTO vms (${VMS_COLUMNS})
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         vm.uuid,
@@ -126,6 +133,7 @@ export class LiteDb {
         vm.ip ?? null,
         vm.scratchDir ?? null,
         vm.createdAt,
+        vm.activeToolCalls ?? 0,
       );
   }
 
@@ -158,6 +166,16 @@ export class LiteDb {
   /** Hard delete — removes the row outright; there is no soft-delete flag. */
   deleteVm(uuid: string): void {
     this.db.prepare("DELETE FROM vms WHERE uuid = ?").run(uuid);
+  }
+
+  /** Increment the active tool call counter for a VM (called before an adapter call). */
+  incrementToolCalls(uuid: string): void {
+    this.db.prepare("UPDATE vms SET activeToolCalls = activeToolCalls + 1 WHERE uuid = ?").run(uuid);
+  }
+
+  /** Decrement the active tool call counter for a VM (called after an adapter call). */
+  decrementToolCalls(uuid: string): void {
+    this.db.prepare("UPDATE vms SET activeToolCalls = MAX(0, activeToolCalls - 1) WHERE uuid = ?").run(uuid);
   }
 
   // -------------------------------------------------------------------------
@@ -236,7 +254,7 @@ export class LiteDb {
     this.db
       .prepare(
         `INSERT INTO artifacts (${ARTIFACTS_COLUMNS})
-         VALUES (?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
@@ -244,6 +262,7 @@ export class LiteDb {
         record.hostPath,
         record.sizeBytes,
         record.inFlight ? 1 : 0,
+        record.inFlightAt ?? null,
         record.createdAt,
       );
   }
@@ -261,7 +280,8 @@ export class LiteDb {
   }
 
   setArtifactInFlight(id: string, inFlight: boolean): void {
-    this.db.prepare("UPDATE artifacts SET inFlight = ? WHERE id = ?").run(inFlight ? 1 : 0, id);
+    const inFlightAt = inFlight ? Date.now() : null;
+    this.db.prepare("UPDATE artifacts SET inFlight = ?, inFlightAt = ? WHERE id = ?").run(inFlight ? 1 : 0, inFlightAt, id);
   }
 
   deleteArtifactsForLease(leaseId: string): void {
@@ -274,6 +294,15 @@ export class LiteDb {
       .prepare("SELECT COUNT(*) AS n FROM artifacts WHERE leaseId = ? AND inFlight = 1")
       .get(leaseId) as { n: number };
     return Number(row.n);
+  }
+
+  /** Clear in-flight flags for artifacts older than the TTL (crash recovery). */
+  clearStaleInFlight(inFlightTtlMs: number = 300_000): number {
+    const cutoff = Date.now() - inFlightTtlMs;
+    const result = this.db
+      .prepare("UPDATE artifacts SET inFlight = 0, inFlightAt = NULL WHERE inFlight = 1 AND inFlightAt < ?")
+      .run(cutoff);
+    return result.changes;
   }
 }
 
@@ -301,6 +330,7 @@ function rowToVm(row: unknown): VmRow | null {
     ip: r.ip == null ? undefined : String(r.ip),
     scratchDir: r.scratchDir == null ? undefined : String(r.scratchDir),
     createdAt: Number(r.createdAt),
+    activeToolCalls: r.activeToolCalls == null ? 0 : Number(r.activeToolCalls),
   };
 }
 
@@ -329,6 +359,7 @@ function rowToArtifact(row: unknown): ArtifactRecord | null {
     hostPath: String(r.hostPath),
     sizeBytes: Number(r.sizeBytes),
     inFlight: Number(r.inFlight) === 1,
+    inFlightAt: r.inFlightAt == null ? undefined : Number(r.inFlightAt),
     createdAt: Number(r.createdAt),
   };
 }

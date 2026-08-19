@@ -37,6 +37,7 @@ export {
   DEFAULT_DRAIN_TIMEOUT_MS,
   DEFAULT_MAX_LIFETIME_MS,
   findVmByIdentity,
+  hasActiveToolCalls,
   isDraining,
   isLeaseExpired,
 } from "./teardown.ts";

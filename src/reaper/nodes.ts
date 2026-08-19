@@ -12,8 +12,7 @@ import { RealProxmox } from "../lite/proxmox-real.ts";
 import type { NodeConfig } from "../shared/types.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 
-/** Env var listing the node fleet ids (comma-separated). */
-const NODES_ENV = "VMHUB_NODES";
+export { resolveNodeConfigs } from "../shared/config.ts";
 
 /**
  * A node the reaper can sweep. `createClient` is called at sweep time (per
@@ -29,32 +28,6 @@ export interface SweepNode {
 /** Static default node config (single-node deployments / legacy path). */
 export function defaultNodeConfig(id: string = DEFAULT_NODE_ID): NodeConfig {
   return { id, baseUrl: "", tokenEnv: "", metadata: { os: [], avx2: false, nestedVirt: false, ramMb: 0 } };
-}
-
-/**
- * Build the static node registry from env:
- *   VMHUB_NODES=a,b,c            comma-separated node ids (default: dl360p)
- *   VMHUB_NODE_<ID>_BASE_URL     per-node API base host[:port]
- *   VMHUB_NODE_<ID>_TOKEN        per-node scoped token (env NAME in tokenEnv)
- * The default single node keeps the legacy PVE_HOST/PVE_TOKEN env (so existing
- * deployments behave exactly as before). Static metadata is left empty — the
- * reaper only needs id/baseUrl/tokenEnv to sweep; constraint evaluation is the
- * control plane's job.
- */
-export function resolveNodeConfigs(env: Record<string, string | undefined> = process.env): NodeConfig[] {
-  const raw = (env[NODES_ENV] ?? "").trim();
-  const ids = raw !== "" ? raw.split(",").map((s) => s.trim()).filter(Boolean) : [DEFAULT_NODE_ID];
-  return ids.map((id) => {
-    const upper = id.toUpperCase();
-    const perNodeToken = env[`VMHUB_NODE_${upper}_TOKEN`];
-    return {
-      id,
-      baseUrl: env[`VMHUB_NODE_${upper}_BASE_URL`] ?? (id === DEFAULT_NODE_ID ? env.PVE_HOST : undefined) ?? "",
-      // Legacy single-node: the default node's token lives in PVE_TOKEN.
-      tokenEnv: perNodeToken !== undefined ? `VMHUB_NODE_${upper}_TOKEN` : id === DEFAULT_NODE_ID ? "PVE_TOKEN" : `VMHUB_NODE_${upper}_TOKEN`,
-      metadata: { os: [], avx2: false, nestedVirt: false, ramMb: 0 },
-    };
-  });
 }
 
 /**

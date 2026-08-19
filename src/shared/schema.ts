@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS vms (
   ip           TEXT,
   scratchDir   TEXT,
   createdAt    INTEGER NOT NULL,
+  activeToolCalls INTEGER NOT NULL DEFAULT 0,
   UNIQUE(nodeId, vmid)
 );
 
@@ -49,15 +50,16 @@ CREATE TABLE IF NOT EXISTS artifacts (
   hostPath  TEXT NOT NULL,
   sizeBytes INTEGER NOT NULL,
   inFlight  INTEGER NOT NULL DEFAULT 0,
+  inFlightAt INTEGER,
   createdAt INTEGER NOT NULL
 );
 `;
 
 export const VMS_COLUMNS =
-  "uuid, vmid, nodeId, templateId, adapter, capabilities, proxmoxTag, namePrefix, status, sshPort, ip, scratchDir, createdAt";
+  "uuid, vmid, nodeId, templateId, adapter, capabilities, proxmoxTag, namePrefix, status, sshPort, ip, scratchDir, createdAt, activeToolCalls";
 export const LEASES_COLUMNS =
   "vmId, owner, requestId, status, expiresAt, lastRenewedAt, renewCount, maxLifetimeMs, createdAt";
-export const ARTIFACTS_COLUMNS = "id, leaseId, hostPath, sizeBytes, inFlight, createdAt";
+export const ARTIFACTS_COLUMNS = "id, leaseId, hostPath, sizeBytes, inFlight, inFlightAt, createdAt";
 
 /**
  * The single node that existed before multi-node support. Legacy Vm rows get

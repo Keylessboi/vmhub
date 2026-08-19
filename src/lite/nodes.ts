@@ -13,7 +13,7 @@
  *   127.0.0.1, so no distributed lock is needed.
  */
 import type { NodeConfig, NodeStatus, Template, VmNode } from "../shared/types.ts";
-import { DEFAULT_NODE_ID } from "../shared/schema.ts";
+import { resolveNodeConfigs } from "../shared/config.ts";
 import type { ProxmoxClient } from "./proxmox.ts";
 import { MockProxmox } from "./proxmox.ts";
 import { createRealProxmox } from "./proxmox-real.ts";
@@ -95,28 +95,7 @@ export function createClientForNode(config: NodeConfig): ProxmoxClient {
  * E5-2670 v2 (no AVX2). Unknown nodes default conservative (avx2:false) so
  * the catalog never lies.
  */
-const NODE_STATIC_METADATA: Record<string, NodeConfig["metadata"]> = {
-  dl360p: { os: ["hyprland", "windows", "x11"], avx2: false, nestedVirt: true, ramMb: 131_072 },
-};
-
-export function resolveNodeConfigs(env: Record<string, string | undefined> = process.env): NodeConfig[] {
-  const raw = env.VMHUB_NODES ?? "";
-  const ids = raw.trim() === "" ? [DEFAULT_NODE_ID] : raw.split(",").map((s) => s.trim()).filter(Boolean);
-  return ids.map((id) => {
-    const upper = id.toUpperCase();
-    const baseUrl = env[`VMHUB_NODE_${upper}_BASE_URL`] ?? (id === DEFAULT_NODE_ID ? env.PVE_HOST : undefined) ?? "";
-    const tokenEnv =
-      id === DEFAULT_NODE_ID
-        ? env.VMHUB_NODE_DL360P_TOKEN ?? "PVE_TOKEN"
-        : `VMHUB_NODE_${upper}_TOKEN`;
-    return {
-      id,
-      baseUrl,
-      tokenEnv,
-      metadata: NODE_STATIC_METADATA[id] ?? { os: [], avx2: false, nestedVirt: false, ramMb: 0 },
-    };
-  });
-}
+export { resolveNodeConfigs } from "../shared/config.ts";
 
 /**
  * Shared probe loop. Probes each registered node, caches results for TTL,

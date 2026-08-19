@@ -16,6 +16,7 @@ import type { Template, VmError } from "../shared/types.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 import type { CreateProxmoxVmInput, ProxmoxClient, ProxmoxVm, ProxmoxVmStatus } from "./proxmox.ts";
 import { isVmError } from "../mcp/errors.ts";
+import { execFileSync } from "node:child_process";
 
 export interface RealProxmoxOptions {
   host: string;
@@ -277,6 +278,57 @@ export class RealProxmox implements ProxmoxClient {
       await this.request("POST", `/nodes/${node}/qemu/${vmid}/status/start`, {});
     }
     return this.getVm(vmid);
+  }
+
+  async probeCapabilities(vmid: number): Promise<{ available: boolean; reason?: string }> {
+    const vm = await this.getVm(vmid);
+    if (!vm.ip) {
+      return { available: false, reason: "VM has no IP address assigned" };
+    }
+
+    const sshKey = process.env.VMHUB_SSH_KEY || `${process.env.HOME}/.ssh/vmhub_rsa`;
+    const sshUser = process.env.VMHUB_SSH_USER || "vmhub";
+
+    const requiredBinaries: Record<string, string[]> = {
+      hyprland: ["hyprctl", "grim", "slurp", "wtype", "wl-copy", "wl-paste", "ffmpeg"],
+      x11: ["xdotool", "scrot", "ffmpeg"],
+      windows: [],
+      headless: ["ffmpeg"],
+    };
+
+    const os = osFromTemplateName(vm.name);
+    const bins = requiredBinaries[os] ?? [];
+    if (bins.length === 0) return { available: true };
+
+    const checkCmd = bins.map((b) => `which ${b} >/dev/null 2>&1`).join(" && ");
+    try {
+      execFileSync("ssh", [
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ConnectTimeout=5",
+        "-o", "BatchMode=yes",
+        "-i", sshKey,
+        `${sshUser}@${vm.ip}`,
+        checkCmd,
+      ], { timeout: 10_000, encoding: "utf8" });
+      return { available: true };
+    } catch (err) {
+      const missing = bins.filter((b) => {
+        try {
+          execFileSync("ssh", [
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "ConnectTimeout=5",
+            "-o", "BatchMode=yes",
+            "-i", sshKey,
+            `${sshUser}@${vm.ip}`,
+            `which ${b} >/dev/null 2>&1`,
+          ], { timeout: 10_000, encoding: "utf8" });
+          return false;
+        } catch {
+          return true;
+        }
+      });
+      return { available: false, reason: `missing: ${missing.join(", ")}` };
+    }
   }
 
   async getVm(vmid: number): Promise<ProxmoxVm> {

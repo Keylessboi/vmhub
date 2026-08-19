@@ -117,4 +117,17 @@ describe("MockProxmox createVm", () => {
     px.reset();
     expect(await px.listVms()).toHaveLength(0);
   });
+
+  test("probeCapabilities always succeeds in MockProxmox", async () => {
+    const px = new MockProxmox();
+    const vm = await px.createVm(input);
+    const result = await px.probeCapabilities(vm.vmid);
+    expect(result).toEqual({ available: true });
+  });
+
+  test("probeCapabilities succeeds for any VMID (even non-existent)", async () => {
+    const px = new MockProxmox();
+    const result = await px.probeCapabilities(9999);
+    expect(result).toEqual({ available: true });
+  });
 });

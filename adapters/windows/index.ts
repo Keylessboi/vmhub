@@ -153,15 +153,33 @@ export class WindowsAdapter implements DesktopAdapter {
   async listWindows(vm: Vm, filter?: string): Promise<WindowInfo[]> {
     const conn = await this.ensureConnection(vm);
     const res = await conn.client.callTool({ name: 'Snapshot', arguments: {} });
-    // CursorTouch Snapshot returns a UIA tree; extract top-level windows.
     const text = textContent(res.content);
     const windows: WindowInfo[] = [];
     if (text) {
-      const lines = text.split('\n').filter((l) => l.trim() && !l.includes('Window') && !l.includes('Root'));
+      const lines = text.split('\n').filter((l) => {
+        const lower = l.toLowerCase();
+        return l.trim() && !lower.includes('window') && !lower.includes('root');
+      });
       const q = filter?.toLowerCase();
-      for (const line of lines.slice(0, 10)) {
+      for (const line of lines) {
         if (q && !line.toLowerCase().includes(q)) continue;
-        windows.push({ id: line.trim(), title: line.trim(), className: '', x: 0, y: 0, width: 0, height: 0, focused: false, visible: true });
+        let x = 0, y = 0, width = 0, height = 0;
+        const rectMatch = line.match(/\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]/);
+        if (rectMatch) {
+          x = parseInt(rectMatch[1]!, 10);
+          y = parseInt(rectMatch[2]!, 10);
+          width = parseInt(rectMatch[3]!, 10);
+          height = parseInt(rectMatch[4]!, 10);
+        } else {
+          const pathMatch = line.match(/Rect\((\d+),\s*(\d+),\s*(\d+),\s*(\d+)\)/i);
+          if (pathMatch) {
+            x = parseInt(pathMatch[1]!, 10);
+            y = parseInt(pathMatch[2]!, 10);
+            width = parseInt(pathMatch[3]!, 10);
+            height = parseInt(pathMatch[4]!, 10);
+          }
+        }
+        windows.push({ id: line.trim(), title: line.trim(), className: '', x, y, width, height, focused: false, visible: true });
       }
     }
     return windows;

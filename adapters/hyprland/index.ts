@@ -105,7 +105,7 @@ export class HyprlandAdapter implements DesktopAdapter {
 
   /** Per-VM Hyprland MCP connection, keyed by uuid. */
   private async ensureConnection(vm: Vm): Promise<HyprlandConnection> {
-    const key = vm.ip ?? vm.uuid;
+    const key = vm.uuid;
     const existing = this.conns.get(key);
     if (existing) return existing;
 

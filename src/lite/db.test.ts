@@ -21,6 +21,7 @@ function vmRow(uuid: string, vmid = 1000, nodeId = DEFAULT_NODE_ID): VmRow {
     namePrefix: "hl",
     status: "ready",
     createdAt: 1_000_000,
+    activeToolCalls: 0,
   };
 }
 

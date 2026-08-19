@@ -33,30 +33,34 @@ export function isDraining(artifacts: ArtifactRecord[], now: number, drainTimeou
   return artifacts.some((a) => a.inFlight && now - a.createdAt < drainTimeoutMs);
 }
 
+/** True when active MCP tool calls prevent teardown. */
+export function hasActiveToolCalls(vm: Vm): boolean {
+  return (vm.activeToolCalls ?? 0) > 0;
+}
+
 /**
  * Identity-verified lookup: find the Proxmox VM whose tags carry the vmhub
  * identity tag (`vmhub-<prefix>-<uuid>`) AND whose name starts with the stored
  * prefix. Matches the real API shape: the identity lives in `tags` (comma-
  * separated on the wire); `proxmoxTag` is a convenience field always present
  * in `tags`. Never trusts an agent-supplied VMID. Returns undefined when the
- * VM is already gone; throws when identity is ambiguous (never guess).
+ * VM is already gone; returns all matches with collision flag when ambiguous
+ * (never guess).
  */
 export async function findVmByIdentity(
   proxmox: ProxmoxClient,
   proxmoxTag: string,
   namePrefix: string,
-): Promise<ProxmoxVm | undefined> {
+): Promise<{ vm: ProxmoxVm | undefined; matches: ProxmoxVm[]; collision: boolean }> {
   const vms = await proxmox.listVms();
   const matches = vms.filter(
     (v) =>
       (v.proxmoxTag === proxmoxTag || v.tags.includes(proxmoxTag)) && v.name.startsWith(namePrefix),
   );
   if (matches.length > 1) {
-    throw new Error(
-      `identity collision: ${matches.length} Proxmox VMs match tag "${proxmoxTag}" + prefix "${namePrefix}"`,
-    );
+    return { vm: undefined, matches, collision: true };
   }
-  return matches[0];
+  return { vm: matches[0], matches, collision: false };
 }
 
 /** Free-disk probe via the ProxmoxClient seam (shared with lite). */
@@ -102,7 +106,11 @@ async function deleteScratchDir(scratchDir: string | undefined): Promise<void> {
 }
 
 /** One lease's teardown verdict — the sweep aggregates these. */
-export type TeardownResult = { kind: "destroyed" } | { kind: "draining" } | { kind: "error"; message: string };
+export type TeardownResult =
+  | { kind: "destroyed" }
+  | { kind: "draining" }
+  | { kind: "quarantined"; vmIds: string[] }
+  | { kind: "error"; message: string };
 
 /** A lease with its VM + artifacts, as produced by listLeasesWithVm. */
 export interface LeaseEntry {
@@ -130,19 +138,43 @@ export async function teardownLease(
   opts: TeardownOptions,
 ): Promise<TeardownResult> {
   if (isDraining(entry.artifacts, opts.now, opts.drainTimeoutMs)) return { kind: "draining" };
+  if (hasActiveToolCalls(entry.vm)) return { kind: "draining" };
 
   try {
     const { vm, artifacts } = entry;
-    const found = await findVmByIdentity(client, vm.proxmoxTag, vm.namePrefix);
-    if (found) {
+    const identity = await findVmByIdentity(client, vm.proxmoxTag, vm.namePrefix);
+
+    if (identity.collision) {
+      const quarantineEnabled = process.env.VMHUB_COLLISION_QUARANTINE !== "false";
+      if (!quarantineEnabled) {
+        throw new Error(
+          `identity collision: ${identity.matches.length} Proxmox VMs match tag "${vm.proxmoxTag}" + prefix "${vm.namePrefix}"`,
+        );
+      }
+      console.error(
+        `[reaper] ALERT identity collision: ${identity.matches.length} VMs match tag "${vm.proxmoxTag}" + prefix "${vm.namePrefix}" — quarantining all leases`,
+      );
+      const quarantinedIds: string[] = [];
+      for (const match of identity.matches) {
+        const allLeases = db.listLeasesWithVm();
+        const hit = allLeases.find((l) => l.vm.proxmoxTag === vm.proxmoxTag && l.vm.namePrefix === vm.namePrefix);
+        if (hit) {
+          db.quarantineLease(hit.vm.uuid);
+          quarantinedIds.push(hit.vm.uuid);
+        }
+      }
+      return { kind: "quarantined", vmIds: quarantinedIds };
+    }
+
+    if (identity.vm) {
       try {
-        await client.destroyVm(found.vmid);
+        await client.destroyVm(identity.vm.vmid);
       } catch (err) {
         // 404 during teardown = VM vanished mid-sweep (race) → already gone → CLEAN.
         if (!(isVmError(err) && err.code === "NOT_FOUND")) throw err;
       }
     }
-    // (found === undefined → VM already gone; still clean files + rows below.)
+    // (identity.vm === undefined → VM already gone; still clean files + rows below.)
 
     for (const artifact of artifacts) {
       await deleteStagedArtifact(artifact, vm.scratchDir, opts.artifactDir);

@@ -164,7 +164,7 @@ function diskFull(freePct: number, threshold: number): VmError {
     code: "DISK_FULL",
     message: `host disk below ${threshold}% free (currently ${freePct.toFixed(1)}%)`,
     retryable: true,
-    hint: "teardown-then-retry",
+    hint: "release old leases with vm_lease_release, then retry vm_lease_create",
     detail: "free disk space (delete old artifacts/leases) then retry",
   };
 }
@@ -174,7 +174,7 @@ function unavailableTemplate(tpl: Template): VmError {
     code: "CAPABILITY_UNAVAILABLE",
     message: `template '${tpl.id}' is '${tpl.availability}', not 'available'`,
     retryable: false,
-    hint: "no-retry",
+    hint: "pick a different template from vm_list_templates",
     detail: tpl.reason,
   };
 }
@@ -258,6 +258,51 @@ function positiveMs(value: unknown): number | undefined {
 }
 
 // ---------------------------------------------------------------------------
+// Provisioning status (feature flag)
+// ---------------------------------------------------------------------------
+
+/**
+ * When true (default), VMs start in "provisioning" status and the control
+ * plane polls Proxmox until the VM reports "running" before transitioning to
+ * "ready". When false, the legacy behaviour applies: status starts as
+ * "starting" and transitions to "ready" immediately after startVm.
+ */
+const USE_PROVISIONING = process.env.VMHUB_PROVISIONING_STATUS !== "false";
+
+/** Default poll timeout for Proxmox readiness (30s). */
+const PROVISION_POLL_TIMEOUT_MS = 30_000;
+/** Default poll interval for Proxmox readiness (500ms). */
+const PROVISION_POLL_INTERVAL_MS = 500;
+
+/**
+ * Poll Proxmox until the VM reports `status === "running"` or timeout.
+ * Throws PROVISION_FAILED on timeout or if getVm itself fails.
+ */
+async function pollProxmoxRunning(
+  client: ProxmoxClient,
+  vmid: number,
+  opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? PROVISION_POLL_TIMEOUT_MS;
+  const intervalMs = opts.intervalMs ?? PROVISION_POLL_INTERVAL_MS;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const pvm = await client.getVm(vmid);
+    if (pvm.status === "running") return;
+    if (Date.now() >= deadline) {
+      throw vmError(
+        "PROVISION_FAILED",
+        `VM ${vmid} did not reach running status within ${timeoutMs}ms`,
+        `last status: ${pvm.status}`,
+      );
+    }
+    await new Promise((r) =>
+      setTimeout(r, Math.min(intervalMs, Math.max(deadline - Date.now(), 1))),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
 
@@ -287,6 +332,7 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
 
   const requestedTtl = positiveMs(body.ttl_ms) ?? positiveMs(body.ttlMs);
   const initialTtl = Math.min(requestedTtl ?? ctx.leaseDurationMs, ctx.maxLifetimeMs);
+  const ttlClamped = requestedTtl !== undefined && requestedTtl > ctx.maxLifetimeMs;
 
   // Multi-node routing: when a registry + probe are wired, select a node that
   // satisfies the template's constraints + golden + RAM/disk headroom, then
@@ -299,17 +345,18 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
   const now = ctx.now();
   const uuid = ctx.uuid();
   const prefix = prefixFromTemplateId(templateId);
+  const useLockedCreate = process.env.VMHUB_LOCKED_CREATE !== "false";
 
   const vm: VmRow = {
     uuid,
-    vmid: 0, // filled from proxmox.createVm
-    nodeId: DEFAULT_NODE_ID, // single-node default; registry-driven routing lands in the multi-node milestone
+    vmid: 0,
+    nodeId: DEFAULT_NODE_ID,
     templateId,
     adapter: tpl.os,
     capabilities: tpl.capabilities,
     proxmoxTag: `vmhub-${prefix}-${uuid}`,
     namePrefix: prefix,
-    status: "ready",
+    status: USE_PROVISIONING ? "provisioning" : "starting",
     createdAt: now,
   };
   const lease: LeaseRow = {
@@ -324,46 +371,81 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
     createdAt: now,
   };
 
-  const pvm = await ctx.proxmox.createVm({
-    templateId,
-    name: `${prefix}-${uuid.slice(0, 8)}`,
-    proxmoxTag: vm.proxmoxTag,
-    cpus: tpl.vcpus,
-    memoryMb: tpl.ramMb,
-  });
-  vm.vmid = pvm.vmid;
-  vm.ip = pvm.ip;
-  // A "ready" lease must be a powered-on VM, not a stopped clone.
-  try {
-    await ctx.proxmox.startVm(pvm.vmid);
-  } catch (err) {
-    // Power-on failure: tear down the clone and surface the error.
-    await ctx.proxmox.destroyVm(pvm.vmid);
-    throw err;
+  const createVmAndStart = async () => {
+    const pvm = await ctx.proxmox.createVm({
+      templateId,
+      name: `${prefix}-${uuid.slice(0, 8)}`,
+      proxmoxTag: vm.proxmoxTag,
+      cpus: tpl.vcpus,
+      memoryMb: tpl.ramMb,
+    });
+    vm.vmid = pvm.vmid;
+    vm.ip = pvm.ip;
+    ctx.db.insertVm(vm);
+    try {
+      await ctx.proxmox.startVm(pvm.vmid);
+    } catch (err) {
+      ctx.db.deleteVm(uuid);
+      await ctx.proxmox.destroyVm(pvm.vmid);
+      throw err;
+    }
+    if (USE_PROVISIONING) {
+      try {
+        await pollProxmoxRunning(ctx.proxmox, pvm.vmid);
+      } catch (err) {
+        ctx.db.deleteVm(uuid);
+        await ctx.proxmox.destroyVm(pvm.vmid);
+        throw isVmError(err)
+          ? err
+          : vmError(
+              "PROVISION_FAILED",
+              `VM ${pvm.vmid} failed Proxmox readiness check after start`,
+              String(err),
+            );
+      }
+    } else {
+      try {
+        await ctx.proxmox.getVm(pvm.vmid);
+      } catch (err) {
+        ctx.db.deleteVm(uuid);
+        await ctx.proxmox.destroyVm(pvm.vmid);
+        throw vmError(
+          "PROVISION_FAILED",
+          `VM ${pvm.vmid} failed Proxmox verification after start`,
+          isVmError(err) ? err.message : String(err),
+        );
+      }
+    }
+    const probe = await ctx.proxmox.probeCapabilities(pvm.vmid);
+    if (!probe.available) {
+      ctx.db.deleteVm(uuid);
+      await ctx.proxmox.destroyVm(pvm.vmid);
+      throw vmError(
+        "CAPABILITY_UNAVAILABLE",
+        `template '${templateId}' probe failed: ${probe.reason}`,
+        probe.reason,
+      );
+    }
+    ctx.db.updateVmStatus(uuid, "ready");
+  };
+
+  if (useLockedCreate) {
+    await ctx.nodeLock.run(DEFAULT_NODE_ID, createVmAndStart);
+  } else {
+    await createVmAndStart();
   }
-  try {
-    await ctx.proxmox.getVm(pvm.vmid);
-  } catch (err) {
-    await ctx.proxmox.destroyVm(pvm.vmid);
-    throw vmError(
-      "PROVISION_FAILED",
-      `VM ${pvm.vmid} failed Proxmox verification after start`,
-      isVmError(err) ? err.message : String(err),
-    );
-  }
-  ctx.db.insertVm(vm);
+
   try {
     ctx.db.insertLease(lease);
   } catch (err) {
-    // UNIQUE(requestId) collision — a concurrent identical request won. Roll
-    // back our VM and return the winner's lease.
     ctx.db.deleteVm(uuid);
-    await ctx.proxmox.destroyVm(pvm.vmid);
+    await ctx.proxmox.destroyVm(vm.vmid);
     const winner = ctx.db.getLeaseByRequestId(requestId);
     if (winner) return json(toLeaseResponse(winner, ctx), 200);
     throw err;
   }
-  return json(toLeaseResponse(lease, ctx), 201);
+  const response = toLeaseResponse(lease, ctx);
+  return json({ ...response, ttlApplied: initialTtl, ttlClamped }, 201);
 }
 
 // ---------------------------------------------------------------------------
@@ -395,10 +477,10 @@ function noNodeAvailable(results: NodeProbeResult[], tpl: Template, floorPct: nu
 /**
  * Route a lease to a satisfying node (5-term availability: reachable ∧
  * constraints ∧ golden present ∧ RAM headroom ≥ ramMb ∧ disk free ≥ floor).
- * The per-node mutex serializes ONLY the allocation critical section
- * (re-probe → headroom check → VMID/IP allocation → submit clone → release);
- * startVm + readiness run OUTSIDE the lock. Sticky nodeId is written to the
- * VmRow before insert — a lease never migrates.
+ * With VMHUB_LOCKED_CREATE (default on), the per-node mutex serializes the
+ * full create → insert → start sequence so concurrent RAM checks cannot all
+ * pass before any insert lands. The legacy path keeps the old non-locked
+ * behaviour for rollback compatibility.
  */
 async function createRoutedLease(
   req: Request,
@@ -427,36 +509,19 @@ async function createRoutedLease(
   const client = ctx.nodes!.client(nodeId);
   if (!client) throw nodeUnavailable(`node '${nodeId}' has no client`);
 
-  const pvm = await ctx.nodeLock.run(nodeId, async () => {
-    // TOCTOU: re-probe the chosen node inside the mutex, right before create.
-    const fresh = await ctx.probe!.refresh(nodeId);
-    if (fresh && fresh.node.status === "online" && nodeSatisfiesTemplate(fresh, tpl, ctx.nodeDiskFloorPct)) {
-      return client.createVm({
-        templateId: tpl.id,
-        name: `${prefix}-${uuid.slice(0, 8)}`,
-        proxmoxTag: `vmhub-${prefix}-${uuid}`,
-        nodeId,
-        cpus: tpl.vcpus,
-        memoryMb: tpl.ramMb,
-      });
-    }
-    throw nodeUnavailable(
-      `node '${nodeId}' became unavailable during routing`,
-      "the node failed its re-probe; retry the lease",
-    );
-  });
+  const useLockedCreate = process.env.VMHUB_LOCKED_CREATE !== "false";
 
   const vm: VmRow = {
     uuid,
-    vmid: pvm.vmid,
+    vmid: 0, // filled from createVm inside the lock
     nodeId,
     templateId: tpl.id,
     adapter: tpl.os,
     capabilities: tpl.capabilities,
     proxmoxTag: `vmhub-${prefix}-${uuid}`,
     namePrefix: prefix,
-    status: "ready",
-    ip: pvm.ip,
+    status: USE_PROVISIONING ? "provisioning" : "starting",
+    ip: undefined,
     createdAt: now,
   };
   const lease: LeaseRow = {
@@ -471,19 +536,126 @@ async function createRoutedLease(
     createdAt: now,
   };
 
-  // startVm runs OUTSIDE the mutex (it is not the allocation critical section).
-  try {
-    await client.startVm(pvm.vmid);
-  } catch (err) {
-    await client.destroyVm(pvm.vmid);
-    throw err;
+  if (useLockedCreate) {
+    await ctx.nodeLock.run(nodeId, async () => {
+      const fresh = await ctx.probe!.refresh(nodeId);
+      if (!(fresh && fresh.node.status === "online" && nodeSatisfiesTemplate(fresh, tpl, ctx.nodeDiskFloorPct))) {
+        throw nodeUnavailable(
+          `node '${nodeId}' became unavailable during routing`,
+          "the node failed its re-probe; retry the lease",
+        );
+      }
+      const currentUsed = usedRamOn(nodeId);
+      if (fresh.ramHeadroomMb - currentUsed < tpl.ramMb) {
+        throw nodeUnavailable(
+          `node '${nodeId}' no longer has enough RAM for template '${tpl.id}'`,
+          `headroom ${fresh.ramHeadroomMb}MB - used ${currentUsed}MB < needed ${tpl.ramMb}MB`,
+        );
+      }
+      const pvm = await client.createVm({
+        templateId: tpl.id,
+        name: `${prefix}-${uuid.slice(0, 8)}`,
+        proxmoxTag: `vmhub-${prefix}-${uuid}`,
+        nodeId,
+        cpus: tpl.vcpus,
+        memoryMb: tpl.ramMb,
+      });
+      vm.vmid = pvm.vmid;
+      vm.ip = pvm.ip;
+      ctx.db.insertVm(vm);
+      try {
+        await client.startVm(pvm.vmid);
+      } catch (err) {
+        ctx.db.deleteVm(uuid);
+        await client.destroyVm(pvm.vmid);
+        throw err;
+      }
+      if (USE_PROVISIONING) {
+        try {
+          await pollProxmoxRunning(client, pvm.vmid);
+        } catch (err) {
+          ctx.db.deleteVm(uuid);
+          await client.destroyVm(pvm.vmid);
+          throw isVmError(err)
+            ? err
+            : vmError(
+                "PROVISION_FAILED",
+                `VM ${pvm.vmid} failed Proxmox readiness check after start`,
+                String(err),
+              );
+        }
+      }
+      const probe = await client.probeCapabilities(pvm.vmid);
+      if (!probe.available) {
+        ctx.db.deleteVm(uuid);
+        await client.destroyVm(pvm.vmid);
+        throw vmError(
+          "CAPABILITY_UNAVAILABLE",
+          `template '${tpl.id}' probe failed: ${probe.reason}`,
+          probe.reason,
+        );
+      }
+      ctx.db.updateVmStatus(uuid, "ready");
+    });
+  } else {
+    const pvm = await ctx.nodeLock.run(nodeId, async () => {
+      const fresh = await ctx.probe!.refresh(nodeId);
+      if (fresh && fresh.node.status === "online" && nodeSatisfiesTemplate(fresh, tpl, ctx.nodeDiskFloorPct)) {
+        return client.createVm({
+          templateId: tpl.id,
+          name: `${prefix}-${uuid.slice(0, 8)}`,
+          proxmoxTag: `vmhub-${prefix}-${uuid}`,
+          nodeId,
+          cpus: tpl.vcpus,
+          memoryMb: tpl.ramMb,
+        });
+      }
+      throw nodeUnavailable(
+        `node '${nodeId}' became unavailable during routing`,
+        "the node failed its re-probe; retry the lease",
+      );
+    });
+    vm.vmid = pvm.vmid;
+    vm.ip = pvm.ip;
+    try {
+      await client.startVm(pvm.vmid);
+    } catch (err) {
+      await client.destroyVm(pvm.vmid);
+      throw err;
+    }
+    if (USE_PROVISIONING) {
+      try {
+        await pollProxmoxRunning(client, pvm.vmid);
+      } catch (err) {
+        await client.destroyVm(pvm.vmid);
+        throw isVmError(err)
+          ? err
+          : vmError(
+              "PROVISION_FAILED",
+              `VM ${pvm.vmid} failed Proxmox readiness check after start`,
+              String(err),
+            );
+      }
+    }
+    const probe = await client.probeCapabilities(pvm.vmid);
+    if (!probe.available) {
+      await client.destroyVm(pvm.vmid);
+      throw vmError(
+        "CAPABILITY_UNAVAILABLE",
+        `template '${tpl.id}' probe failed: ${probe.reason}`,
+        probe.reason,
+      );
+    }
+    vm.status = USE_PROVISIONING ? "provisioning" : "ready";
+    ctx.db.insertVm(vm);
+    ctx.db.updateVmStatus(uuid, "ready");
   }
-  ctx.db.insertVm(vm);
+
   try {
     ctx.db.insertLease(lease);
   } catch (err) {
     ctx.db.deleteVm(uuid);
-    await client.destroyVm(pvm.vmid);
+    await client.destroyVm(vm.vmid);
     const winner = ctx.db.getLeaseByRequestId(requestId);
     if (winner) return json(toLeaseResponse(winner, ctx), 200);
     throw err;
@@ -618,6 +790,20 @@ function getVm(req: Request, ctx: ResolvedDeps, uuid: string): Response {
   return json(vm);
 }
 
+function incrementToolCalls(_req: Request, ctx: ResolvedDeps, uuid: string): Response {
+  const vm = ctx.db.getVm(uuid);
+  if (!vm) throw notFound(`vm '${uuid}' not found`);
+  ctx.db.incrementToolCalls(uuid);
+  return json({ activeToolCalls: (ctx.db.getVm(uuid)?.activeToolCalls ?? 0) });
+}
+
+function decrementToolCalls(_req: Request, ctx: ResolvedDeps, uuid: string): Response {
+  const vm = ctx.db.getVm(uuid);
+  if (!vm) throw notFound(`vm '${uuid}' not found`);
+  ctx.db.decrementToolCalls(uuid);
+  return json({ activeToolCalls: (ctx.db.getVm(uuid)?.activeToolCalls ?? 0) });
+}
+
 interface ArtifactCreateBody {
   lease_id?: unknown;
   leaseId?: unknown;
@@ -692,6 +878,8 @@ const ROUTES: Route[] = [
   { method: "GET", segments: ["v1", "vms", ":id"], handler: getVm },
   { method: "POST", segments: ["v1", "artifacts"], handler: createArtifact },
   { method: "GET", segments: ["v1", "artifacts", ":id"], handler: getArtifact },
+  { method: "POST", segments: ["v1", "vms", ":id", "tool-calls", "increment"], handler: incrementToolCalls },
+  { method: "POST", segments: ["v1", "vms", ":id", "tool-calls", "decrement"], handler: decrementToolCalls },
 ];
 
 export function createLiteHandler(deps: RouterDeps): (req: Request) => Promise<Response> {

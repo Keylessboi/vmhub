@@ -1,5 +1,8 @@
 # vmhub — current state and setup notes
 
+> **New to vmhub?** Start with the [Quickstart](../README.md#quickstart) in
+> the README. This document covers server-specific details and advanced config.
+
 ## What exists today
 
 The server is an HP ProLiant DL360p Gen8 (`192.168.1.220`), running Proxmox
@@ -69,26 +72,44 @@ it.
 
 ## Credential configuration
 
-Two credential paths exist for backward compatibility:
+Two credential paths exist for backward compatibility.
 
-| Variable | Used by | Purpose |
+### Single-node setup (most users)
+
+Set three variables. Leave `VMHUB_NODE_*` blank.
+
+| Variable | Required | Example |
 |---|---|---|
-| `PVE_TOKEN` | Default node (legacy single-node) | Proxmox API token for the default host |
-| `PVE_TOKEN_ID` | All nodes | Token ID (e.g. `vmhub@pve!automation`) |
-| `VMHUB_NODE_<ID>_TOKEN` | Named nodes (multi-node) | Per-node Proxmox API tokens |
+| `PVE_HOST` | Yes | `192.168.1.220:8006` |
+| `PVE_TOKEN_ID` | Yes | `vmhub@pve!automation` |
+| `PVE_TOKEN` | Yes | (token secret from Proxmox) |
 
-**Precedence**: For the default node, `PVE_TOKEN` is used. For named nodes
-(e.g. `DL360P`), `VMHUB_NODE_<ID>_TOKEN` takes priority. If both `PVE_TOKEN`
-and a per-node token are set, the per-node token wins for that node.
+**Port required**: `PVE_HOST` must include `:8006`. Proxmox does not listen
+on 443. Without the port, connections fail silently with a cryptic error.
 
-**Single-node deployments**: Set `PVE_HOST`, `PVE_TOKEN_ID`, and `PVE_TOKEN`.
-The `VMHUB_NODE_*` variables can be left empty.
+### Multi-node setup
 
-**Multi-node deployments**: Set `VMHUB_NODES` to a comma-separated list of node
-IDs, then provide `VMHUB_NODE_<ID>_BASE_URL` and `VMHUB_NODE_<ID>_TOKEN` for
-each. `PVE_TOKEN` is still used as fallback for the default node.
+Set `VMHUB_NODES` to a comma-separated list of node IDs, then provide
+per-node variables for each:
 
-See `.env.example` for the full variable list.
+| Variable | Purpose |
+|---|---|
+| `VMHUB_NODES` | Comma-separated node IDs, e.g. `DL360P,DL380G9` |
+| `VMHUB_NODE_<ID>_BASE_URL` | Per-node host:port |
+| `VMHUB_NODE_<ID>_TOKEN` | Per-node API token |
+
+**Precedence**: per-node tokens win over `PVE_TOKEN` for their node.
+`PVE_TOKEN` serves as fallback for the default node. If both `PVE_TOKEN`
+and a per-node token are set, the per-node token takes priority.
+
+### CursorTouch auth (Windows VMs only)
+
+`CURSORTOUCH_AUTH_KEY` authenticates the Windows adapter to the in-VM
+CursorTouch MCP server. Required for Windows templates. For local setups,
+generate a random string and configure the same value inside the golden
+image. See `.env.example` for details.
+
+See `.env.example` for the full variable list with required/optional markers.
 
 ## Docs
 

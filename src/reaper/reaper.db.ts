@@ -89,6 +89,7 @@ interface VmRow {
   ip: string | null;
   scratchDir: string | null;
   createdAt: number;
+  activeToolCalls: number;
 }
 
 interface LeaseRow {
@@ -134,6 +135,7 @@ function parseVmRow(r: Record<string, unknown>): Vm {
     ip: row.ip ?? undefined,
     scratchDir: row.scratchDir ?? undefined,
     createdAt: row.createdAt,
+    activeToolCalls: row.activeToolCalls ?? 0,
   };
 }
 
@@ -174,6 +176,8 @@ export interface ReaperDb {
   markVmDestroyed(vmId: string): void;
   /** Remove a single artifact row by id (after its staged file is deleted). */
   deleteArtifact(artifactId: string): void;
+  /** Quarantine a lease + mark its VM quarantined (collision defence). */
+  quarantineLease(vmId: string): void;
   close(): void;
 }
 
@@ -191,7 +195,7 @@ class SqliteReaperDb implements ReaperDb {
     const rows = this.#db
       .prepare(
         `SELECT v.uuid, v.vmid, v.nodeId, v.templateId, v.adapter, v.capabilities, v.proxmoxTag,
-                v.namePrefix, v.status, v.sshPort, v.ip, v.scratchDir, v.createdAt,
+                v.namePrefix, v.status, v.sshPort, v.ip, v.scratchDir, v.createdAt, v.activeToolCalls,
                 l.vmId, l.owner, l.requestId, l.status AS leaseStatus, l.expiresAt,
                 l.lastRenewedAt, l.renewCount, l.maxLifetimeMs
          FROM leases l
@@ -240,6 +244,11 @@ class SqliteReaperDb implements ReaperDb {
 
   markVmDestroyed(vmId: string): void {
     this.#db.prepare("UPDATE vms SET status = 'destroyed' WHERE uuid = ?").run(vmId);
+  }
+
+  quarantineLease(vmId: string): void {
+    this.#db.prepare("UPDATE leases SET status = 'quarantined' WHERE vmId = ?").run(vmId);
+    this.#db.prepare("UPDATE vms SET status = 'quarantined' WHERE uuid = ?").run(vmId);
   }
 
   deleteArtifact(artifactId: string): void {

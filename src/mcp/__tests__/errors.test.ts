@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  capabilityUnavailableError,
   DEFAULT_HINT,
   err,
   errorResult,
@@ -21,7 +22,7 @@ describe('vmError / makeVmError', () => {
     expect(e.code).toBe('NOT_FOUND');
     expect(e.message).toBe('template nope not found');
     expect(e.retryable).toBe(false);
-    expect(e.hint).toBe('no-retry');
+    expect(e.hint).toBe('verify the ID exists with vm_list_vms or vm_list_templates');
   });
 
   it('marks retryable codes correctly', () => {
@@ -42,6 +43,24 @@ describe('vmError / makeVmError', () => {
   it('includes detail when provided', () => {
     const e = vmError('DISK_FULL', 'no space', '15% refusal');
     expect(e.detail).toBe('15% refusal');
+  });
+});
+
+describe('capabilityUnavailableError', () => {
+  it('builds a CAPABILITY_UNAVAILABLE error with alternatives', () => {
+    const capable = ['Windows Shared', 'Windows Dedicated'];
+    const e = capabilityUnavailableError('screenshot', 'hyprland', 'screenshot', capable);
+    expect(e.code).toBe('CAPABILITY_UNAVAILABLE');
+    expect(e.message).toContain('screenshot');
+    expect(e.message).toContain('hyprland');
+    expect(e.hint).toContain('vm_list_templates');
+  });
+
+  it('works with empty capable list', () => {
+    const e = capabilityUnavailableError('paste', 'hyprland', 'paste', []);
+    expect(e.code).toBe('CAPABILITY_UNAVAILABLE');
+    expect(e.message).toContain('paste');
+    expect(e.message).toContain('No templates available');
   });
 });
 
