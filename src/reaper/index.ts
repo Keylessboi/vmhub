@@ -69,8 +69,14 @@ export interface SweepReport {
   draining: number;
   /** VMs destroyed by identity (or already gone), files deleted, rows cleared. */
   destroyed: number;
-  /** True when the sweep refused all destructive work (disk < refusal pct). */
-  refusedDiskFull: boolean;
+  /**
+   * True when free disk is below the refusal threshold. ADVISORY ONLY — the
+   * sweep still reaps expired leases (that is what reclaims the space).
+   * Absent when no node could be probed.
+   */
+  diskPressure?: boolean;
+  /** Tightest free-disk reading across probed nodes; absent when unprobeable. */
+  diskFreePercent?: number;
   /** Per-lease failures (identity collision, destroy error, ...). */
   errors: { vmId: string; message: string }[];
   /** Prominent alert lines (e.g. a node flipping to 'stuck'). */

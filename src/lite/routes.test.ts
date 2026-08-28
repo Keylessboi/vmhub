@@ -325,7 +325,8 @@ describe("POST /v1/leases/{id}/renew", () => {
     expect(status).toBe(410);
     expect(json.error.code).toBe("LEASE_EXPIRED");
     expect(json.error.retryable).toBe(false);
-    expect(json.error.hint).toBe("no-retry");
+    // The hint is actionable prose, never a bare policy token.
+    expect(json.error.hint).toBe("create a new lease with vm_lease_create");
   });
 
   test("renewing an unknown or released lease → 404", async () => {

@@ -14,6 +14,11 @@
  * Per-node outcome counters persist in the durable ledger so they survive
  * reaper restarts; sweep-on-return reconciles deferred leases idempotently by
  * identity tag.
+ *
+ * Low free disk does NOT stop a sweep. Reaping expired leases is what reclaims
+ * space, so refusing to reap under disk pressure deadlocks the fleet (the disk
+ * stays full and lease creation keeps refusing at the same threshold). Disk
+ * pressure is reported (diskPressure/diskFreePercent) and swept through.
  */
 
 import type { ProxmoxClient } from "../lite/proxmox.ts";
@@ -49,6 +54,43 @@ interface NodeSweepContext {
 /** Group key: legacy rows carry '' (pre-multi-node default); treat as the fleet default. */
 function nodeIdOf(vm: { nodeId: string }): string {
   return vm.nodeId && vm.nodeId.trim() !== "" ? vm.nodeId : DEFAULT_NODE_ID;
+}
+
+/**
+ * Best-effort free-disk probe across the nodes that actually hold expired
+ * leases, reported as the tightest (minimum) reading.
+ *
+ * Never throws: an unreachable node contributes no datapoint rather than
+ * aborting the sweep. Returns undefined when nothing could be probed.
+ */
+async function probeDiskFreePercent(
+  nodes: SweepNode[],
+  byNode: Map<string, LeaseEntry[]>,
+  opts: SweepOptions,
+): Promise<number | undefined> {
+  if (opts.diskFreePercent) {
+    try {
+      return await opts.diskFreePercent();
+    } catch {
+      return undefined;
+    }
+  }
+  // Prefer the nodes with expired leases; fall back to the whole fleet.
+  const relevant = nodes.filter((n) => byNode.has(n.config.id));
+  const targets = relevant.length > 0 ? relevant : nodes;
+  const readings: number[] = [];
+  for (const node of targets) {
+    let client: ProxmoxClient | undefined;
+    try {
+      client = node.createClient();
+      readings.push(await clientDiskFreePercent(client));
+    } catch {
+      // Unreachable/asleep node: no datapoint. sweepNode defers its leases.
+    } finally {
+      await client?.close?.().catch(() => {});
+    }
+  }
+  return readings.length > 0 ? Math.min(...readings) : undefined;
 }
 
 /**
@@ -199,7 +241,6 @@ export async function sweepNodes(db: ReaperDb, nodes: SweepNode[], opts: SweepOp
     expired: 0,
     draining: 0,
     destroyed: 0,
-    refusedDiskFull: false,
     errors: [],
     alerts: [],
     nodes: [],
@@ -220,18 +261,25 @@ export async function sweepNodes(db: ReaperDb, nodes: SweepNode[], opts: SweepOp
     byNode.set(nodeId, list);
   }
 
-  // 15 % disk-full refusal — refuse ALL destructive work below the threshold.
-  const diskFreePercent =
-    opts.diskFreePercent ??
-    (nodes.length > 0 ? () => clientDiskFreePercent(nodes[0]!.createClient()) : async () => 100);
-  const freePct = await diskFreePercent();
-  if (freePct < refusalPct) {
-    report.refusedDiskFull = true;
-    report.errors.push({
-      vmId: "*",
-      message: `sweep refused: disk free ${freePct.toFixed(1)}% < ${refusalPct}% refusal threshold`,
-    });
-    return report;
+  // Disk pressure is ADVISORY here, never a refusal. Reaping expired leases is
+  // the remedy for a full disk, so refusing to reap below the threshold
+  // deadlocks the fleet: the disk stays full, vm_lease_create keeps refusing at
+  // the same threshold, and nothing ever reclaims the space. Below the
+  // threshold we sweep HARDER and say so in the report.
+  //
+  // The probe is best-effort and must never abort the sweep: a node that is
+  // asleep or unreachable is handled fail-closed inside sweepNode (its leases
+  // are deferred), so an unreachable node here is a missing datapoint, not a
+  // fatal error.
+  const freePct = await probeDiskFreePercent(nodes, byNode, opts);
+  if (freePct !== undefined) {
+    report.diskFreePercent = freePct;
+    if (freePct < refusalPct) {
+      report.diskPressure = true;
+      report.alerts.push(
+        `disk free ${freePct.toFixed(1)}% < ${refusalPct}% — reaping expired leases to reclaim space`,
+      );
+    }
   }
 
   const ctx: NodeSweepContext = { db, report, now, drainTimeoutMs, artifactDir: opts.artifactDir, ledger };

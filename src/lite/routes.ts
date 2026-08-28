@@ -34,6 +34,7 @@ import { randomUUID } from "node:crypto";
 import type { ProxmoxClient } from "./proxmox.ts";
 import { isVmError, vmError } from "../mcp/errors.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
+import { DEFAULT_HINT } from "../shared/types.ts";
 import type { NodeProbe, NodeRegistry, NodeProbeResult } from "./nodes.ts";
 import { byDiskThenId, nodeSatisfiesTemplate, PerNodeLock } from "./nodes.ts";
 import type { LeaseRow, LeaseStatus, LiteDb, VmRow } from "./db.ts";
@@ -144,19 +145,19 @@ function errorResponse(err: unknown): Response {
 function toVmError(err: unknown): VmError {
   if (isVmError(err)) return err;
   const message = err instanceof Error ? err.message : String(err);
-  return { code: "INTERNAL", message, retryable: false, hint: "no-retry" };
+  return { code: "INTERNAL", message, retryable: false, hint: DEFAULT_HINT.INTERNAL };
 }
 
 function invalidRequest(message: string): VmError {
-  return { code: "INVALID_REQUEST", message, retryable: false, hint: "no-retry" };
+  return { code: "INVALID_REQUEST", message, retryable: false, hint: DEFAULT_HINT.INVALID_REQUEST };
 }
 
 function notFound(message: string): VmError {
-  return { code: "NOT_FOUND", message, retryable: false, hint: "no-retry" };
+  return { code: "NOT_FOUND", message, retryable: false, hint: DEFAULT_HINT.NOT_FOUND };
 }
 
 function leaseExpired(message: string, detail?: string): VmError {
-  return { code: "LEASE_EXPIRED", message, retryable: false, hint: "no-retry", detail };
+  return { code: "LEASE_EXPIRED", message, retryable: false, hint: DEFAULT_HINT.LEASE_EXPIRED, detail };
 }
 
 function diskFull(freePct: number, threshold: number): VmError {
