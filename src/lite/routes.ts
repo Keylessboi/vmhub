@@ -324,12 +324,22 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
   const existing = ctx.db.getLeaseByRequestId(requestId);
   if (existing) return json(toLeaseResponse(existing, ctx), 200);
 
-  assertDiskSpace(ctx);
-
+  // Validate the REQUEST before probing host resources. A bad template_id
+  // reported as DISK_FULL sends the agent off to free disk space and retry,
+  // only to hit NOT_FOUND afterwards — argument errors must win over
+  // resource errors, because only one of the two is the caller's to fix.
   const templates = await ctx.proxmox.listTemplates();
   const tpl = templates.find((t) => t.id === templateId);
-  if (!tpl) throw notFound(`template '${templateId}' not found`);
+  if (!tpl) {
+    throw notFound(
+      `template '${templateId}' not found — provisionable template ids: ${
+        templates.map((t) => t.id).join(", ") || "(none)"
+      }`,
+    );
+  }
   if (tpl.availability !== "available") throw unavailableTemplate(tpl);
+
+  assertDiskSpace(ctx);
 
   const requestedTtl = positiveMs(body.ttl_ms) ?? positiveMs(body.ttlMs);
   const initialTtl = Math.min(requestedTtl ?? ctx.leaseDurationMs, ctx.maxLifetimeMs);

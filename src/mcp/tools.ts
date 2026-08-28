@@ -17,7 +17,16 @@ const DRAIN_ENABLED = process.env.VMHUB_TOOL_DRAIN !== 'false';
 
 const lastLeaseCreate = new Map<string, number>();
 
-let templateCache: { templates: Template[]; timestamp: number } | null = null;
+/**
+ * Template cache, keyed by the lite client it was fetched from.
+ *
+ * A single module-level cache leaked one server's catalog into every other
+ * server built in the same process — two McpDeps with different lite backends
+ * would serve each other's templates until the TTL expired. Keying on the
+ * client keeps production behaviour identical (one lite = one cache) while
+ * making each server independent.
+ */
+const templateCaches = new WeakMap<LiteClient, { templates: Template[]; timestamp: number }>();
 
 export interface McpDeps {
   lite: LiteClient;
@@ -40,11 +49,12 @@ export interface McpDeps {
 async function getCachedTemplates(deps: McpDeps): Promise<Template[]> {
   const now = Date.now();
   const cacheTtlMs = parseInt(process.env.VMHUB_TEMPLATE_CACHE_TTL_MS ?? '60000', 10);
-  if (templateCache && now - templateCache.timestamp < cacheTtlMs) {
-    return templateCache.templates;
+  const cached = templateCaches.get(deps.lite);
+  if (cached && now - cached.timestamp < cacheTtlMs) {
+    return cached.templates;
   }
   const templates = await deps.lite.getTemplates();
-  templateCache = { templates, timestamp: now };
+  templateCaches.set(deps.lite, { templates, timestamp: now });
   return templates;
 }
 
@@ -206,8 +216,14 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
     {
       title: 'VM capabilities (runtime query)',
       description:
-        'Runtime capability query for one template/adapter id: the full Capability declaration (windowing, input modalities, semantic tree, file transports, exec) plus the tool-surface capabilities actually available.',
-      inputSchema: z.object({ id: z.string().describe('Template/adapter id, e.g. "hyprland", "windows"') }),
+        'Runtime capability query for one template id, adapter id, or VM uuid: the full Capability declaration (windowing, input modalities, semantic tree, file transports, exec) plus the tool-surface capabilities actually available. The returned "template.id" is always a leasable id you can pass straight to vm_lease_create.',
+      inputSchema: z.object({
+        id: z
+          .string()
+          .describe(
+            'A template id from vm_list_templates (e.g. "2070"), an adapter id (e.g. "hyprland", "windows"), or a VM uuid.',
+          ),
+      }),
       annotations: { readOnlyHint: true },
     },
     async ({ id }) => {
@@ -216,7 +232,22 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         if (deps.registry.has(id)) {
           const adapter = deps.registry.get(id);
           const report = capabilityReport(adapter);
-          return okResult('vm_capabilities', { ...report, template: getTemplate(deps.registry, id) }, start);
+          // `id` here is an ADAPTER id ("x11"), which vm_lease_create cannot
+          // accept — the live catalog keys templates by Proxmox VMID ("2060").
+          // Return the live template for this adapter's os so `template.id` is
+          // always something the agent can pass straight to vm_lease_create.
+          // Only when lite has no golden for the os do we fall back to the
+          // local matrix entry, which is explicitly marked unavailable.
+          const live = await getCachedTemplates(deps).catch((): Template[] => []);
+          const liveForOs = live.find((t) => t.os === adapter.capability.os);
+          const template =
+            liveForOs ??
+            ({
+              ...getTemplate(deps.registry, id),
+              availability: 'unavailable' as const,
+              reason: `no live golden on Proxmox for os "${adapter.capability.os}" — this adapter cannot be leased right now`,
+            } satisfies Template);
+          return okResult('vm_capabilities', { ...report, template }, start);
         }
         const real = await getCachedTemplates(deps);
         const t = real.find((r) => r.id === id);
