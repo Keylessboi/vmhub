@@ -122,6 +122,38 @@ describe("reaper.db", () => {
     expect(all[0]?.lease.expiresAt).toBe(10_000);
   });
 
+  it("migrates a pre-migration schema instead of dying on a missing column", async () => {
+    // Reproduces the production failure: lite created this file before the
+    // activeToolCalls column existed, and every reaper sweep then died with
+    // `no such column: v.activeToolCalls` until lite happened to be redeployed.
+    // The reaper must bring the schema up to date itself.
+    const Ctor = await loadDbDriver();
+    const legacyPath = join(dir, "legacy.sqlite");
+    const legacy = new Ctor(legacyPath);
+    legacy.exec(`
+      CREATE TABLE vms (
+        uuid TEXT PRIMARY KEY, vmid INTEGER NOT NULL, templateId TEXT NOT NULL,
+        adapter TEXT NOT NULL, capabilities TEXT NOT NULL, proxmoxTag TEXT NOT NULL,
+        namePrefix TEXT NOT NULL, status TEXT NOT NULL, sshPort INTEGER,
+        scratchDir TEXT, createdAt INTEGER NOT NULL
+      );
+      CREATE TABLE leases (
+        vmId TEXT PRIMARY KEY, owner TEXT NOT NULL, requestId TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL, expiresAt INTEGER NOT NULL, lastRenewedAt INTEGER NOT NULL,
+        renewCount INTEGER NOT NULL, maxLifetimeMs INTEGER NOT NULL, createdAt INTEGER NOT NULL
+      );
+      CREATE TABLE artifacts (
+        id TEXT PRIMARY KEY, leaseId TEXT NOT NULL, hostPath TEXT NOT NULL,
+        sizeBytes INTEGER NOT NULL, inFlight INTEGER NOT NULL, createdAt INTEGER NOT NULL
+      );
+    `);
+    legacy.close();
+
+    db = await openReaperDb(legacyPath);
+    // The query that used to throw now runs clean.
+    expect(db.listLeasesWithVm()).toEqual([]);
+  });
+
   it("join carries nodeId into each lease's VM", async () => {
     await insertFixture(conn, { ...makeVm("u-1", 1000), nodeId: "node-b" }, makeLease("u-1"));
     await insertFixture(conn, { ...makeVm("u-2", 1001), nodeId: "dl360p" }, makeLease("u-2"));

@@ -266,6 +266,31 @@ export interface VmError {
 }
 
 /**
+ * Render any thrown value as a readable one-line message.
+ *
+ * `String(err)` on a VmError (a plain object, not an Error) yields the useless
+ * "[object Object]" — which is exactly what the reaper reported for every
+ * failed node, hiding the real cause behind a placeholder. Everything that
+ * logs a caught value should go through this.
+ */
+export function describeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "object" && err !== null) {
+    const e = err as Partial<VmError> & { toString?: () => string };
+    if (typeof e.code === "string" && typeof e.message === "string") {
+      return e.detail ? `${e.code}: ${e.message} (${e.detail})` : `${e.code}: ${e.message}`;
+    }
+    // Any other object: JSON beats "[object Object]".
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return Object.prototype.toString.call(err);
+    }
+  }
+  return String(err);
+}
+
+/**
  * Per-code recovery guidance — the single source of truth shared by BOTH
  * lanes (vmhub-mcp and vmhub-lite), so an agent gets the same advice for the
  * same code no matter which layer produced the error.

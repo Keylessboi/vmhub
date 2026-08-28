@@ -547,6 +547,26 @@ describe("reaper sweep", () => {
     expect(report.destroyed).toBe(1);
   });
 
+  it("--dry-run reports what would be reaped and destroys nothing", async () => {
+    const proxmox = new MockProxmox();
+    await seedProxmoxVm(proxmox, fx);
+    const now = Date.now();
+    await seedLease(fx, {
+      vm: makeVm(fx),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+    });
+
+    db = await openReaperDb(fx.dbPath);
+    const report = await sweep(db, proxmox, { artifactDir: fx.artifactDir, now: () => now, dryRun: true });
+
+    expect(report.expired).toBe(1);
+    expect(report.destroyed).toBe(0);
+    expect(report.wouldDestroy).toHaveLength(1);
+    // The VM and its lease row both survive a dry run.
+    expect((await proxmox.listVms()).length).toBe(1);
+    expect(db.listLeasesWithVm()).toHaveLength(1);
+  });
+
   it("sweeps through an unreachable disk probe instead of aborting the run", async () => {
     const proxmox = new MockProxmox();
     await seedProxmoxVm(proxmox, fx);

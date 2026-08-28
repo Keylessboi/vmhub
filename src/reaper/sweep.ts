@@ -31,6 +31,7 @@ import {
 } from "./ledger.ts";
 import { defaultNodeConfig, type SweepNode } from "./nodes.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
+import { describeError } from "../shared/types.ts";
 import { DEFAULT_DRAIN_TIMEOUT_MS, clientDiskFreePercent, isLeaseExpired, teardownLease, type LeaseEntry } from "./teardown.ts";
 import type { ReaperDb } from "./reaper.db.ts";
 import type { SweepOptions, SweepReport } from "./index.ts";
@@ -49,6 +50,7 @@ interface NodeSweepContext {
   drainTimeoutMs: number;
   artifactDir?: string;
   ledger: SweepLedger;
+  dryRun?: boolean;
 }
 
 /** Group key: legacy rows carry '' (pre-multi-node default); treat as the fleet default. */
@@ -122,7 +124,7 @@ async function sweepNode(
   try {
     await client.listVms();
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = describeError(err);
     const consecutiveAuthFailures = (prev?.consecutiveAuthFailures ?? 0) + 1;
     const stuck = consecutiveAuthFailures >= STUCK_THRESHOLD;
     const outcome: NodeSweepOutcome = stuck ? "stuck" : "auth-failed";
@@ -162,10 +164,18 @@ async function sweepNode(
       now: ctx.now,
       drainTimeoutMs: ctx.drainTimeoutMs,
       artifactDir: ctx.artifactDir,
+      dryRun: ctx.dryRun,
     });
     switch (result.kind) {
       case "destroyed":
         destroyed++;
+        break;
+      case "would-destroy":
+        report.wouldDestroy.push({
+          vmId: result.vmId,
+          nodeId: node.config.id,
+          ...(result.vmid !== undefined ? { vmid: result.vmid } : {}),
+        });
         break;
       case "draining":
         report.draining++;
@@ -244,6 +254,7 @@ export async function sweepNodes(db: ReaperDb, nodes: SweepNode[], opts: SweepOp
     errors: [],
     alerts: [],
     nodes: [],
+    wouldDestroy: [],
   };
   const all = db.listLeasesWithVm();
   report.scanned = all.length;
@@ -282,7 +293,7 @@ export async function sweepNodes(db: ReaperDb, nodes: SweepNode[], opts: SweepOp
     }
   }
 
-  const ctx: NodeSweepContext = { db, report, now, drainTimeoutMs, artifactDir: opts.artifactDir, ledger };
+  const ctx: NodeSweepContext = { db, report, now, drainTimeoutMs, artifactDir: opts.artifactDir, ledger, dryRun: opts.dryRun };
   const configById = new Map(nodes.map((n) => [n.config.id, n]));
   const openClients: ProxmoxClient[] = [];
   try {

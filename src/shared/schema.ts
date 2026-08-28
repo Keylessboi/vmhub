@@ -66,3 +66,51 @@ export const ARTIFACTS_COLUMNS = "id, leaseId, hostPath, sizeBytes, inFlight, in
  * backfilled to this id; single-node deployments keep it as their default.
  */
 export const DEFAULT_NODE_ID = "dl360p";
+
+/**
+ * Additive column migrations, applied by EVERY lane that opens the database.
+ *
+ * SCHEMA_SQL is all `CREATE TABLE IF NOT EXISTS`, so it cannot add a column to
+ * a table that already exists. These ALTERs carry that load. They live here,
+ * not in lite, because the reaper opens the same file: when only lite migrated,
+ * a reaper newer than the deployed lite crashed on `no such column:
+ * v.activeToolCalls` and every sweep failed until lite happened to be
+ * redeployed. Whoever opens the DB first now brings it up to date.
+ *
+ * Each entry is idempotent — guarded by a PRAGMA table_info check — so running
+ * them repeatedly, from either lane, in any order, is safe.
+ */
+export const COLUMN_MIGRATIONS: { table: string; column: string; ddl: string }[] = [
+  { table: "vms", column: "ip", ddl: "ALTER TABLE vms ADD COLUMN ip TEXT;" },
+  {
+    table: "vms",
+    column: "nodeId",
+    ddl: `ALTER TABLE vms ADD COLUMN nodeId TEXT NOT NULL DEFAULT '${DEFAULT_NODE_ID}';`,
+  },
+  {
+    table: "vms",
+    column: "activeToolCalls",
+    ddl: "ALTER TABLE vms ADD COLUMN activeToolCalls INTEGER NOT NULL DEFAULT 0;",
+  },
+  { table: "artifacts", column: "inFlightAt", ddl: "ALTER TABLE artifacts ADD COLUMN inFlightAt INTEGER;" },
+];
+
+/** Minimal surface needed to run the migrations (both drivers satisfy it). */
+export interface MigratableDb {
+  exec(sql: string): unknown;
+  prepare(sql: string): { all(...params: unknown[]): Record<string, unknown>[] };
+}
+
+/** Apply every missing additive column. Safe to call on every open. */
+export function applyColumnMigrations(db: MigratableDb): void {
+  const columnsByTable = new Map<string, Set<string>>();
+  for (const { table } of COLUMN_MIGRATIONS) {
+    if (columnsByTable.has(table)) continue;
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    columnsByTable.set(table, new Set(cols.map((c) => c.name)));
+  }
+  for (const { table, column, ddl } of COLUMN_MIGRATIONS) {
+    if (columnsByTable.get(table)?.has(column)) continue;
+    db.exec(ddl);
+  }
+}

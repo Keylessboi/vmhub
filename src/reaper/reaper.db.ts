@@ -15,7 +15,7 @@
 
 import type { ArtifactRecord, Lease, Vm, VmStatus } from "../shared/types.ts";
 import { join } from "node:path";
-import { DEFAULT_NODE_ID, SCHEMA_SQL } from "../shared/schema.ts";
+import { applyColumnMigrations, DEFAULT_NODE_ID, SCHEMA_SQL } from "../shared/schema.ts";
 
 /** Env-var name for the SQLite path (shared with lite). */
 export const VMHUB_DB_ENV = "VMHUB_DB";
@@ -189,6 +189,10 @@ class SqliteReaperDb implements ReaperDb {
     this.#db = db;
     this.#db.exec("PRAGMA journal_mode = WAL;");
     this.#db.exec(SCHEMA_SQL);
+    // The reaper opens the SAME file as lite and selects columns lite added in
+    // later migrations. Applying them here too means a reaper newer than the
+    // deployed lite no longer dies on `no such column: v.activeToolCalls`.
+    applyColumnMigrations(this.#db);
   }
 
   listLeasesWithVm(): LeaseWithVm[] {

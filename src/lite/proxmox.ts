@@ -174,6 +174,25 @@ const CANNED_TEMPLATES: CannedTemplate[] = [
 /** Fake storage pool size backing MockProxmox's disk seam (1 TiB). */
 const MOCK_POOL_BYTES = 1024 ** 4;
 
+/**
+ * Free space in the node's VM storage pool, as a percentage.
+ *
+ * This is the number the allocation guard must use: VMs are allocated out of
+ * the Proxmox pool, not out of whatever filesystem the control plane happens
+ * to be running on. Returns 100 when the pool cannot be measured, so an
+ * unreachable node fails later with a real error instead of a bogus DISK_FULL.
+ */
+export async function proxmoxDiskFreePercent(client: ProxmoxClient): Promise<number> {
+  try {
+    const [free, used] = await Promise.all([client.diskFreeBytes(), client.diskUsedBytes()]);
+    const total = free + used;
+    if (!Number.isFinite(total) || total <= 0) return 100;
+    return (free / total) * 100;
+  } catch {
+    return 100;
+  }
+}
+
 function notFound(message: string): VmError {
   return { code: "NOT_FOUND", message, retryable: false, hint: DEFAULT_HINT.NOT_FOUND };
 }

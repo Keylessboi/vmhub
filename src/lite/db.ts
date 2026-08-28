@@ -14,7 +14,7 @@
 import { mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { ArtifactRecord, Vm } from "../shared/types.ts";
-import { ARTIFACTS_COLUMNS, DEFAULT_NODE_ID, LEASES_COLUMNS, SCHEMA_SQL, VMS_COLUMNS } from "../shared/schema.ts";
+import { applyColumnMigrations, ARTIFACTS_COLUMNS, DEFAULT_NODE_ID, LEASES_COLUMNS, SCHEMA_SQL, VMS_COLUMNS } from "../shared/schema.ts";
 
 export type LeaseStatus = "active" | "released";
 
@@ -88,21 +88,7 @@ export class LiteDb {
     }
     this.db = new dbCtor(path);
     this.db.exec(SCHEMA_SQL);
-    // Idempotent migrations: add columns introduced after the table existed.
-    const cols = this.db.prepare("PRAGMA table_info(vms)").all() as { name: string }[];
-    if (!cols.some((c) => c.name === "ip")) {
-      this.db.exec("ALTER TABLE vms ADD COLUMN ip TEXT;");
-    }
-    if (!cols.some((c) => c.name === "nodeId")) {
-      this.db.exec(`ALTER TABLE vms ADD COLUMN nodeId TEXT NOT NULL DEFAULT '${DEFAULT_NODE_ID}';`);
-    }
-    if (!cols.some((c) => c.name === "activeToolCalls")) {
-      this.db.exec("ALTER TABLE vms ADD COLUMN activeToolCalls INTEGER NOT NULL DEFAULT 0;");
-    }
-    const artifactCols = this.db.prepare("PRAGMA table_info(artifacts)").all() as { name: string }[];
-    if (!artifactCols.some((c) => c.name === "inFlightAt")) {
-      this.db.exec("ALTER TABLE artifacts ADD COLUMN inFlightAt INTEGER;");
-    }
+    applyColumnMigrations(this.db);
   }
 
   close(): void {
