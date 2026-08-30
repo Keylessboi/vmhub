@@ -13,6 +13,7 @@ import { isAbsolute, resolve } from "node:path";
 import type { ProxmoxClient, ProxmoxVm } from "../lite/proxmox.ts";
 import { isVmError } from "../mcp/errors.ts";
 import type { ArtifactRecord, Lease, Vm } from "../shared/types.ts";
+import { describeError } from "../shared/types.ts";
 import type { ReaperDb } from "./reaper.db.ts";
 
 /** Default hard cap on lease lifetime (plan: 24 h). Overridable per lease via maxLifetimeMs. */
@@ -110,7 +111,9 @@ export type TeardownResult =
   | { kind: "destroyed" }
   | { kind: "draining" }
   | { kind: "quarantined"; vmIds: string[] }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string }
+  /** dry-run only: identity resolved, nothing touched. */
+  | { kind: "would-destroy"; vmId: string; vmid?: number };
 
 /** A lease with its VM + artifacts, as produced by listLeasesWithVm. */
 export interface LeaseEntry {
@@ -123,6 +126,12 @@ export interface TeardownOptions {
   now: number;
   drainTimeoutMs: number;
   artifactDir?: string;
+  /**
+   * Resolve identity and report what WOULD be destroyed, without destroying
+   * the VM, deleting staged files, or touching any DB row. Lets an operator
+   * see the blast radius before letting the reaper loose.
+   */
+  dryRun?: boolean;
 }
 
 /**
@@ -166,6 +175,12 @@ export async function teardownLease(
       return { kind: "quarantined", vmIds: quarantinedIds };
     }
 
+    // Dry run stops here: identity is resolved (the risky inference), but the
+    // VM, its files, and its rows are all left exactly as they are.
+    if (opts.dryRun) {
+      return { kind: "would-destroy", vmId: vm.uuid, ...(identity.vm ? { vmid: identity.vm.vmid } : {}) };
+    }
+
     if (identity.vm) {
       try {
         await client.destroyVm(identity.vm.vmid);
@@ -184,6 +199,6 @@ export async function teardownLease(
 
     return { kind: "destroyed" };
   } catch (err) {
-    return { kind: "error", message: err instanceof Error ? err.message : String(err) };
+    return { kind: "error", message: describeError(err) };
   }
 }

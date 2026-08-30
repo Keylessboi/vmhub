@@ -28,12 +28,13 @@
  * SECURITY: v1 has no auth layer. The server is expected to be bound to
  * 127.0.0.1 (see server.ts); never expose these routes on a network.
  */
-import { statfsSync, statSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { ProxmoxClient } from "./proxmox.ts";
+import { proxmoxDiskFreePercent } from "./proxmox.ts";
 import { isVmError, vmError } from "../mcp/errors.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
+import { DEFAULT_HINT, describeError } from "../shared/types.ts";
 import type { NodeProbe, NodeRegistry, NodeProbeResult } from "./nodes.ts";
 import { byDiskThenId, nodeSatisfiesTemplate, PerNodeLock } from "./nodes.ts";
 import type { LeaseRow, LeaseStatus, LiteDb, VmRow } from "./db.ts";
@@ -59,8 +60,8 @@ export interface RouterDeps {
   probe?: NodeProbe;
   /** Minimum free-disk percent a node must have to host a lease (multi-node). */
   nodeDiskFloorPct?: number;
-  /** Free disk percentage (0-100) as reported for the allocation dir. */
-  diskFreePct?: () => number;
+  /** Free disk percentage (0-100) in the node's VM storage pool. */
+  diskFreePct?: () => number | Promise<number>;
   /** Allocation is refused when free space is below this percent. */
   diskRefusalThresholdPct?: number;
   /** Default lease length when the request does not send ttl_ms, ms. */
@@ -78,7 +79,7 @@ export interface ResolvedDeps {
   probe?: NodeProbe;
   nodeDiskFloorPct: number;
   nodeLock: PerNodeLock;
-  diskFreePct: () => number;
+  diskFreePct: () => number | Promise<number>;
   diskRefusalThresholdPct: number;
   leaseDurationMs: number;
   maxLifetimeMs: number;
@@ -99,7 +100,7 @@ function resolveDeps(deps: RouterDeps): ResolvedDeps {
     probe: deps.probe,
     nodeDiskFloorPct: deps.nodeDiskFloorPct ?? DEFAULT_NODE_DISK_FLOOR_PCT,
     nodeLock: new PerNodeLock(),
-    diskFreePct: deps.diskFreePct ?? defaultDiskFreePct,
+    diskFreePct: deps.diskFreePct ?? (() => proxmoxDiskFreePercent(deps.proxmox)),
     diskRefusalThresholdPct: deps.diskRefusalThresholdPct ?? DEFAULT_DISK_THRESHOLD_PCT,
     leaseDurationMs: deps.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS,
     maxLifetimeMs: deps.maxLifetimeMs ?? DEFAULT_MAX_LIFETIME_MS,
@@ -143,20 +144,20 @@ function errorResponse(err: unknown): Response {
 
 function toVmError(err: unknown): VmError {
   if (isVmError(err)) return err;
-  const message = err instanceof Error ? err.message : String(err);
-  return { code: "INTERNAL", message, retryable: false, hint: "no-retry" };
+  const message = describeError(err);
+  return { code: "INTERNAL", message, retryable: false, hint: DEFAULT_HINT.INTERNAL };
 }
 
 function invalidRequest(message: string): VmError {
-  return { code: "INVALID_REQUEST", message, retryable: false, hint: "no-retry" };
+  return { code: "INVALID_REQUEST", message, retryable: false, hint: DEFAULT_HINT.INVALID_REQUEST };
 }
 
 function notFound(message: string): VmError {
-  return { code: "NOT_FOUND", message, retryable: false, hint: "no-retry" };
+  return { code: "NOT_FOUND", message, retryable: false, hint: DEFAULT_HINT.NOT_FOUND };
 }
 
 function leaseExpired(message: string, detail?: string): VmError {
-  return { code: "LEASE_EXPIRED", message, retryable: false, hint: "no-retry", detail };
+  return { code: "LEASE_EXPIRED", message, retryable: false, hint: DEFAULT_HINT.LEASE_EXPIRED, detail };
 }
 
 function diskFull(freePct: number, threshold: number): VmError {
@@ -180,35 +181,17 @@ function unavailableTemplate(tpl: Template): VmError {
 }
 
 // ---------------------------------------------------------------------------
-// Disk-free check (injectable for tests; default reads the filesystem)
+// Disk-free check (injectable for tests; defaults to the node's storage pool)
+//
+// This used to statfs(".") — the filesystem the control plane happened to be
+// running from. VMs are allocated out of the Proxmox storage pool, so a full
+// laptop refused every lease on a node with 90% of its pool free, and a full
+// pool looked fine whenever the local disk had room. The measurement now comes
+// from the same ProxmoxClient seam the reaper uses.
 // ---------------------------------------------------------------------------
 
-function defaultDiskFreePct(dir = "."): number {
-  try {
-    const s = statfsSync(dir);
-    const total = Number(s.blocks) * Number(s.bsize);
-    if (!Number.isFinite(total) || total <= 0) return 100;
-    const free = Number(s.bavail) * Number(s.bsize);
-    return (free / total) * 100;
-  } catch {
-    // statfs unavailable (older runtime) → fall back to `df -P -B1`
-  }
-  try {
-    const out = execFileSync("df", ["-P", "-B1", dir], { encoding: "utf8" });
-    const line = out.trim().split("\n").pop();
-    const parts = line?.split(/\s+/);
-    const total = parts?.[1] ? Number(parts[1]) : Number.NaN;
-    const free = parts?.[3] ? Number(parts[3]) : Number.NaN;
-    if (!Number.isFinite(total) || total <= 0) return 100;
-    if (!Number.isFinite(free)) return 100;
-    return (free / total) * 100;
-  } catch {
-    return 100; // can't measure → don't block allocations
-  }
-}
-
-function assertDiskSpace(ctx: ResolvedDeps): void {
-  const free = ctx.diskFreePct();
+async function assertDiskSpace(ctx: ResolvedDeps): Promise<void> {
+  const free = await ctx.diskFreePct();
   if (free < ctx.diskRefusalThresholdPct) {
     throw diskFull(free, ctx.diskRefusalThresholdPct);
   }
@@ -323,12 +306,22 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
   const existing = ctx.db.getLeaseByRequestId(requestId);
   if (existing) return json(toLeaseResponse(existing, ctx), 200);
 
-  assertDiskSpace(ctx);
-
+  // Validate the REQUEST before probing host resources. A bad template_id
+  // reported as DISK_FULL sends the agent off to free disk space and retry,
+  // only to hit NOT_FOUND afterwards — argument errors must win over
+  // resource errors, because only one of the two is the caller's to fix.
   const templates = await ctx.proxmox.listTemplates();
   const tpl = templates.find((t) => t.id === templateId);
-  if (!tpl) throw notFound(`template '${templateId}' not found`);
+  if (!tpl) {
+    throw notFound(
+      `template '${templateId}' not found — provisionable template ids: ${
+        templates.map((t) => t.id).join(", ") || "(none)"
+      }`,
+    );
+  }
   if (tpl.availability !== "available") throw unavailableTemplate(tpl);
+
+  await assertDiskSpace(ctx);
 
   const requestedTtl = positiveMs(body.ttl_ms) ?? positiveMs(body.ttlMs);
   const initialTtl = Math.min(requestedTtl ?? ctx.leaseDurationMs, ctx.maxLifetimeMs);
@@ -824,7 +817,7 @@ async function createArtifact(req: Request, ctx: ResolvedDeps): Promise<Response
   if (!lease) throw notFound(`lease '${leaseId}' not found`);
   if (lease.status !== "active") throw notFound(`lease '${leaseId}' is not active`);
 
-  assertDiskSpace(ctx);
+  await assertDiskSpace(ctx);
 
   const sizeBytes = positiveMs(body.size_bytes) ?? positiveMs(body.sizeBytes) ?? statSize(hostPath);
   const record: ArtifactRecord = {

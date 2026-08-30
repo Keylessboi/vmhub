@@ -256,9 +256,60 @@ export interface VmError {
   code: ErrorCode;
   message: string;
   retryable: boolean;
+  /**
+   * Actionable recovery prose the agent reads to decide what to do next.
+   * Never a bare policy token like "no-retry" — that tells an agent nothing.
+   * Default to DEFAULT_HINT[code] when a call site has nothing better.
+   */
   hint: string;
   detail?: string;
 }
+
+/**
+ * Render any thrown value as a readable one-line message.
+ *
+ * `String(err)` on a VmError (a plain object, not an Error) yields the useless
+ * "[object Object]" — which is exactly what the reaper reported for every
+ * failed node, hiding the real cause behind a placeholder. Everything that
+ * logs a caught value should go through this.
+ */
+export function describeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "object" && err !== null) {
+    const e = err as Partial<VmError> & { toString?: () => string };
+    if (typeof e.code === "string" && typeof e.message === "string") {
+      return e.detail ? `${e.code}: ${e.message} (${e.detail})` : `${e.code}: ${e.message}`;
+    }
+    // Any other object: JSON beats "[object Object]".
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return Object.prototype.toString.call(err);
+    }
+  }
+  return String(err);
+}
+
+/**
+ * Per-code recovery guidance — the single source of truth shared by BOTH
+ * lanes (vmhub-mcp and vmhub-lite), so an agent gets the same advice for the
+ * same code no matter which layer produced the error.
+ */
+export const DEFAULT_HINT: Record<ErrorCode, string> = {
+  CAPABILITY_UNAVAILABLE: "pick a different template from vm_list_templates",
+  QUOTA_EXCEEDED: "wait 30s then retry, or release existing leases with vm_lease_release",
+  HOST_CAPACITY: "wait 60s for resources to free up, then retry",
+  NODE_UNAVAILABLE: "wait 30s then retry, or try a different node with vm_list_vms",
+  DISK_FULL: "release old leases with vm_lease_release, then retry vm_lease_create",
+  BOOT_TIMEOUT: "release the lease with vm_lease_release, then create a new one",
+  LOCK_CONTENTION: "wait 5s then retry, or release existing leases first",
+  PROVISION_FAILED: "release the lease with vm_lease_release, then create a new one",
+  LEASE_EXPIRED: "create a new lease with vm_lease_create",
+  NOT_FOUND: "verify the ID exists with vm_list_vms or vm_list_templates",
+  ALREADY_EXISTS: "this resource already exists — use the existing one",
+  INVALID_REQUEST: "check the tool parameters and try again",
+  INTERNAL: "retry once, then report the error to your operator",
+};
 
 // ---------------------------------------------------------------------------
 // Template catalog — capability query BEFORE vm creation

@@ -3,8 +3,8 @@
  * osFromTemplateName (golden name → adapter OS family mapping) and the
  * registry-driven per-node static-NAT allocator.
  */
-import { describe, expect, it } from 'vitest';
-import { osFromTemplateName, NodeIpPool, poolForNode } from './proxmox-real.ts';
+import { afterEach, describe, expect, it } from 'vitest';
+import { osFromTemplateName, NodeIpPool, poolForNode, RealProxmox } from './proxmox-real.ts';
 import { isVmError } from '../mcp/errors.ts';
 
 describe('osFromTemplateName', () => {
@@ -71,5 +71,64 @@ describe('NodeIpPool allocator', () => {
         expect(err.retryable).toBe(false);
       }
     }
+  });
+});
+
+describe('listVms resilience', () => {
+  /** Stub fetch: /nodes, /cluster/resources, then per-VM config. */
+  function stubFetch(configResponder: (vmid: number) => { ok: boolean; body: unknown }) {
+    return async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input);
+      const json = (body: unknown) => new Response(JSON.stringify({ data: body }), { status: 200 });
+
+      if (url.endsWith('/nodes')) return json([{ node: 'vmhub' }]);
+      if (url.includes('/cluster/resources')) {
+        return json([
+          { vmid: 3000, node: 'vmhub', name: 'orphan' },
+          { vmid: 1001, node: 'vmhub', name: 'x11-abc' },
+        ]);
+      }
+      const m = url.match(/\/qemu\/(\d+)\/config/);
+      if (m) {
+        const res = configResponder(Number(m[1]));
+        return res.ok
+          ? json(res.body)
+          : new Response(JSON.stringify({ message: res.body }), { status: 500 });
+      }
+      return json({});
+    };
+  }
+
+  const original = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+
+  it('skips a VM whose config is gone instead of failing the whole listing', async () => {
+    // Reproduces the live failure: /cluster/resources still advertised vmid
+    // 3000 after its qemu-server/3000.conf was gone. That one orphan threw,
+    // listVms threw, the node sweep failed, and the reaper reaped nothing.
+    globalThis.fetch = stubFetch((vmid) =>
+      vmid === 3000
+        ? { ok: false, body: "Configuration file 'nodes/vmhub/qemu-server/3000.conf' does not exist" }
+        : { ok: true, body: { tags: 'vmhub-x11-abc' } },
+    ) as unknown as typeof fetch;
+
+    const client = new RealProxmox({ host: 'h:8006', tokenId: 't', token: 's', nodeId: 'dl360p' });
+    const vms = await client.listVms();
+
+    expect(vms.map((v) => v.vmid)).toEqual([1001]);
+  });
+
+  it('returns every tagged VM when all configs resolve', async () => {
+    globalThis.fetch = stubFetch(() => ({
+      ok: true,
+      body: { tags: 'vmhub-x11-abc' },
+    })) as unknown as typeof fetch;
+
+    const client = new RealProxmox({ host: 'h:8006', tokenId: 't', token: 's', nodeId: 'dl360p' });
+    const vms = await client.listVms();
+
+    expect(vms.map((v) => v.vmid).sort()).toEqual([1001, 3000]);
   });
 });

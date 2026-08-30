@@ -14,6 +14,7 @@ import { buildMcpServer } from '../index.ts';
 import { Registry } from '../../../adapters/index.ts';
 import { fakePng } from '../../../adapters/_mock.ts';
 import { x11Adapter } from '../../../adapters/x11/index.ts';
+import { WindowsAdapter } from '../../../adapters/windows/index.ts';
 import { vmError } from '../errors.ts';
 import { VM_TOOLS } from '../capabilities.ts';
 import type { DesktopAdapter, InputAction, SemanticElement, Vm, WindowInfo } from '../../shared/types.ts';
@@ -368,6 +369,30 @@ describe('template catalog (real Proxmox VMIDs are the ids)', () => {
     const res = await client.callTool({ name: 'vm_capabilities', arguments: { id: 'hyprland' } });
     const sc = res.structuredContent as { result?: { availableTools?: string[] } };
     expect(sc.result?.availableTools).toContain(CAPABILITIES.dispatch);
+  });
+
+  it('vm_capabilities on an adapter id returns a LEASABLE template id, not the adapter id', async () => {
+    // The trap: an agent reads template.id off vm_capabilities and passes it
+    // to vm_lease_create. Returning "hyprland" there sends it to an id the
+    // live catalog does not have — templates are keyed by Proxmox VMID.
+    const { client } = await setupReal();
+    const res = await client.callTool({ name: 'vm_capabilities', arguments: { id: 'hyprland' } });
+    const sc = res.structuredContent as { result?: { template?: Template } };
+    expect(sc.result?.template?.id).toBe('2070');
+    expect(sc.result?.template?.availability).toBe('available');
+  });
+
+  it('vm_capabilities marks an adapter with no live golden unavailable', async () => {
+    // windows has no golden in realCatalog() — the local matrix entry must not
+    // be handed back as if it were leasable.
+    const { client } = await connectServer({
+      registry: new Registry({ windows: new WindowsAdapter() }),
+      lite: new FakeLite('windows', realCatalog()),
+    });
+    const res = await client.callTool({ name: 'vm_capabilities', arguments: { id: 'windows' } });
+    const sc = res.structuredContent as { result?: { template?: Template } };
+    expect(sc.result?.template?.availability).toBe('unavailable');
+    expect(sc.result?.template?.reason).toMatch(/no live golden/);
   });
 });
 

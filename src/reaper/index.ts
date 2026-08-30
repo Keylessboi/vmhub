@@ -48,6 +48,8 @@ export { STUCK_THRESHOLD, type NodeSweepState, type SweepLedger } from "./ledger
 export interface SweepOptions {
   /** Injectable clock for tests. */
   now?: () => number;
+  /** Report what would be reaped without destroying anything (`--dry-run`). */
+  dryRun?: boolean;
   /** Hard timeout for in-flight artifact transfers (default 5 min). */
   drainTimeoutMs?: number;
   /** Disk-full refusal threshold in percent (default 15). */
@@ -69,14 +71,22 @@ export interface SweepReport {
   draining: number;
   /** VMs destroyed by identity (or already gone), files deleted, rows cleared. */
   destroyed: number;
-  /** True when the sweep refused all destructive work (disk < refusal pct). */
-  refusedDiskFull: boolean;
+  /**
+   * True when free disk is below the refusal threshold. ADVISORY ONLY — the
+   * sweep still reaps expired leases (that is what reclaims the space).
+   * Absent when no node could be probed.
+   */
+  diskPressure?: boolean;
+  /** Tightest free-disk reading across probed nodes; absent when unprobeable. */
+  diskFreePercent?: number;
   /** Per-lease failures (identity collision, destroy error, ...). */
   errors: { vmId: string; message: string }[];
   /** Prominent alert lines (e.g. a node flipping to 'stuck'). */
   alerts: string[];
   /** Per-node sweep outcomes (multi-node; one entry per node touched). */
   nodes: NodeSweepResult[];
+  /** Dry-run only: what this sweep WOULD have destroyed. Empty otherwise. */
+  wouldDestroy: { vmId: string; nodeId: string; vmid?: number }[];
 }
 
 export interface NodeSweepResult {
@@ -109,6 +119,8 @@ export interface ReaperRuntimeOptions {
   artifactDir?: string;
   diskFullRefusalPct?: number;
   drainTimeoutMs?: number;
+  /** Report what would be reaped without destroying anything (`--dry-run`). */
+  dryRun?: boolean;
   /** Durable ledger path. Defaults to <dbdir>/sweeps.jsonl. */
   ledgerPath?: string;
   /** Injectable clock for tests. */
@@ -143,6 +155,7 @@ export async function runOnce(opts: ReaperRuntimeOptions = {}): Promise<SweepRep
       artifactDir: opts.artifactDir,
       diskFullRefusalPct: opts.diskFullRefusalPct,
       drainTimeoutMs: opts.drainTimeoutMs,
+      dryRun: opts.dryRun,
       now: opts.now,
       ledger,
     });
@@ -163,11 +176,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
   const drainTimeoutMs = Number(process.env[ENV.drainTimeoutMs] ?? DEFAULT_DRAIN_TIMEOUT_MS);
   const intervalMs = Number(process.env[ENV.intervalMs] ?? 0);
   const nodes = resolveNodeConfigs();
+  const dryRun = argv.includes("--dry-run");
 
   if (argv.includes("--help")) {
     console.log(
       [
         "vmhub-reaper — independent lease reaper (per-node fail-closed sweep)",
+        "",
+        "  --dry-run       resolve identity and report what WOULD be reaped",
+        "                  (wouldDestroy[]) without destroying anything",
         "",
         `  ${ENV.db}            sqlite path (default: <VMHUB_LEASE_DIR>/leases.sqlite)`,
         `  ${ENV.leaseDir}       lease dir (default: ./leases) — sweeps.jsonl ledger lives here`,
@@ -195,6 +212,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       artifactDir,
       diskFullRefusalPct,
       drainTimeoutMs,
+      dryRun,
       nodes,
     });
     console.log(JSON.stringify(report, null, 2));

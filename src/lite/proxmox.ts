@@ -9,8 +9,8 @@
  * `vmhub-<prefix>-<uuid>` tag carried on the VM. Numeric VMIDs are internal
  * and never treated as stable vmhub identities.
  */
-import { statfsSync } from "node:fs";
 import type { Template, VmError } from "../shared/types.ts";
+import { DEFAULT_HINT } from "../shared/types.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 
 export type ProxmoxVmStatus = "running" | "stopped" | "provisioning";
@@ -171,8 +171,30 @@ const CANNED_TEMPLATES: CannedTemplate[] = [
   },
 ];
 
+/** Fake storage pool size backing MockProxmox's disk seam (1 TiB). */
+const MOCK_POOL_BYTES = 1024 ** 4;
+
+/**
+ * Free space in the node's VM storage pool, as a percentage.
+ *
+ * This is the number the allocation guard must use: VMs are allocated out of
+ * the Proxmox pool, not out of whatever filesystem the control plane happens
+ * to be running on. Returns 100 when the pool cannot be measured, so an
+ * unreachable node fails later with a real error instead of a bogus DISK_FULL.
+ */
+export async function proxmoxDiskFreePercent(client: ProxmoxClient): Promise<number> {
+  try {
+    const [free, used] = await Promise.all([client.diskFreeBytes(), client.diskUsedBytes()]);
+    const total = free + used;
+    if (!Number.isFinite(total) || total <= 0) return 100;
+    return (free / total) * 100;
+  } catch {
+    return 100;
+  }
+}
+
 function notFound(message: string): VmError {
-  return { code: "NOT_FOUND", message, retryable: false, hint: "no-retry" };
+  return { code: "NOT_FOUND", message, retryable: false, hint: DEFAULT_HINT.NOT_FOUND };
 }
 
 function unavailable(tpl: CannedTemplate): VmError {
@@ -180,7 +202,7 @@ function unavailable(tpl: CannedTemplate): VmError {
     code: "CAPABILITY_UNAVAILABLE",
     message: `template '${tpl.id}' is '${tpl.availability}', not 'available'`,
     retryable: false,
-    hint: "no-retry",
+    hint: DEFAULT_HINT.CAPABILITY_UNAVAILABLE,
     detail: tpl.reason,
   };
 }
@@ -254,22 +276,20 @@ export class MockProxmox implements ProxmoxClient {
     this.vms.delete(this.key(this.nodeId, vmid));
   }
 
+  /**
+   * Fake pool: 90% free, fixed.
+   *
+   * This deliberately does NOT read the host filesystem. Reporting the
+   * developer's real free space made every disk-sensitive test depend on the
+   * machine it ran on — suites went green or red based on `df`. Tests that
+   * care about disk override these two methods explicitly.
+   */
   async diskFreeBytes(): Promise<number> {
-    try {
-      const s = statfsSync(".");
-      return Number(s.bavail) * Number(s.bsize);
-    } catch {
-      return Number.MAX_SAFE_INTEGER; // unmeasurable → never block on disk
-    }
+    return MOCK_POOL_BYTES * 0.9;
   }
 
   async diskUsedBytes(): Promise<number> {
-    try {
-      const s = statfsSync(".");
-      return (Number(s.blocks) - Number(s.bavail)) * Number(s.bsize);
-    } catch {
-      return 0;
-    }
+    return MOCK_POOL_BYTES * 0.1;
   }
 
   async probeCapabilities(_vmid: number): Promise<{ available: boolean; reason?: string }> {

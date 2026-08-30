@@ -13,6 +13,7 @@
  * the tag; listVms filters to tagged VMs.
  */
 import type { Template, VmError } from "../shared/types.ts";
+import { describeError } from "../shared/types.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 import type { CreateProxmoxVmInput, ProxmoxClient, ProxmoxVm, ProxmoxVmStatus } from "./proxmox.ts";
 import { isVmError } from "../mcp/errors.ts";
@@ -344,7 +345,19 @@ export class RealProxmox implements ProxmoxClient {
     const out: ProxmoxVm[] = [];
     for (const v of vms ?? []) {
       if (v.node !== node) continue;
-      const config = (await this.request("GET", `/nodes/${node}/qemu/${v.vmid}/config`)) as { tags?: string };
+      // /cluster/resources lags the real config: a VM deleted (or half-created)
+      // can linger there with no qemu-server/<vmid>.conf behind it. Letting that
+      // throw failed the WHOLE listing, which failed the whole node sweep — one
+      // orphaned record was enough to stop the reaper reaping anything at all.
+      // A VM whose config we cannot read is one we cannot identify as ours, so
+      // skipping it keeps the identity contract fail-closed.
+      let config: { tags?: string };
+      try {
+        config = (await this.request("GET", `/nodes/${node}/qemu/${v.vmid}/config`)) as { tags?: string };
+      } catch (err) {
+        console.error(`[proxmox] skipping vm ${v.vmid} on ${node}: ${describeError(err)}`);
+        continue;
+      }
       const tags = this.parseTags(config);
       if (tags.some((t) => t.startsWith("vmhub-"))) out.push(this.toVm(v, tags, node));
     }

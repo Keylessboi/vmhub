@@ -48,19 +48,30 @@ describe('vmError / makeVmError', () => {
 
 describe('capabilityUnavailableError', () => {
   it('builds a CAPABILITY_UNAVAILABLE error with alternatives', () => {
-    const capable = ['Windows Shared', 'Windows Dedicated'];
-    const e = capabilityUnavailableError('screenshot', 'hyprland', 'screenshot', capable);
+    // The 4th arg is a list of ADAPTER ids, not leasable template ids.
+    const e = capabilityUnavailableError('vm_paste', 'x11', 'paste', ['windows', 'android']);
     expect(e.code).toBe('CAPABILITY_UNAVAILABLE');
-    expect(e.message).toContain('screenshot');
-    expect(e.message).toContain('hyprland');
+    expect(e.message).toContain('vm_paste');
+    expect(e.message).toContain('x11');
+    expect(e.hint).toContain('vm_list_templates');
+  });
+
+  it('directs the agent at the template "os" field, never at raw adapter ids', () => {
+    // Naming adapter ids as if they were template ids is the namespace bug
+    // this error used to have: "windows" is not something vm_lease_create
+    // accepts — the live catalog keys templates by VMID.
+    const e = capabilityUnavailableError('vm_paste', 'x11', 'paste', ['windows']);
+    expect(e.message).toContain('"os"');
+    expect(e.message).toContain('windows');
+    expect(e.detail).toContain('vm_lease_create');
     expect(e.hint).toContain('vm_list_templates');
   });
 
   it('works with empty capable list', () => {
-    const e = capabilityUnavailableError('paste', 'hyprland', 'paste', []);
+    const e = capabilityUnavailableError('vm_paste', 'hyprland', 'paste', []);
     expect(e.code).toBe('CAPABILITY_UNAVAILABLE');
     expect(e.message).toContain('paste');
-    expect(e.message).toContain('No templates available');
+    expect(e.message).toContain('No registered adapter provides');
   });
 });
 

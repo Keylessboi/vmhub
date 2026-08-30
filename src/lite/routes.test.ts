@@ -207,6 +207,42 @@ describe("POST /v1/leases", () => {
     expect(c.db.listVms()).toHaveLength(0);
   });
 
+  test("the disk guard measures the Proxmox pool, not the local filesystem", async () => {
+    // Regression: the default probe used to statfs("."), so a full control-plane
+    // disk refused every lease even when the node's pool had plenty of room —
+    // and a full pool went unnoticed whenever the local disk was fine.
+    const db = new LiteDb(":memory:");
+    const proxmox = new MockProxmox();
+    // Pool is 5% free; the local filesystem is irrelevant to this decision.
+    proxmox.diskFreeBytes = async () => 5;
+    proxmox.diskUsedBytes = async () => 95;
+
+    // No diskFreePct override → exercises the real default.
+    const h = createLiteHandler({ db, proxmox, diskRefusalThresholdPct: 15 });
+    const res = await h(
+      new Request("http://x/v1/leases", {
+        method: "POST",
+        body: JSON.stringify({ template_id: "2060", owner: "me", request_id: "pool-1" }),
+      }),
+    );
+    expect(res.status).toBe(507);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("DISK_FULL");
+
+    // Same handler shape, roomy pool → the lease is allowed through.
+    const db2 = new LiteDb(":memory:");
+    const roomy = new MockProxmox();
+    roomy.diskFreeBytes = async () => 900;
+    roomy.diskUsedBytes = async () => 100;
+    const h2 = createLiteHandler({ db: db2, proxmox: roomy, diskRefusalThresholdPct: 15 });
+    const ok = await h2(
+      new Request("http://x/v1/leases", {
+        method: "POST",
+        body: JSON.stringify({ template_id: "2060", owner: "me", request_id: "pool-2" }),
+      }),
+    );
+    expect(ok.status).toBe(201);
+  });
+
   test("malformed JSON body → 400 INVALID_REQUEST", async () => {
     const c = makeCtx();
     const h = handler(c);
@@ -325,7 +361,8 @@ describe("POST /v1/leases/{id}/renew", () => {
     expect(status).toBe(410);
     expect(json.error.code).toBe("LEASE_EXPIRED");
     expect(json.error.retryable).toBe(false);
-    expect(json.error.hint).toBe("no-retry");
+    // The hint is actionable prose, never a bare policy token.
+    expect(json.error.hint).toBe("create a new lease with vm_lease_create");
   });
 
   test("renewing an unknown or released lease → 404", async () => {
