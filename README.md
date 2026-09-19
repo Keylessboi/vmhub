@@ -152,6 +152,18 @@ Network policy is enforced by the Proxmox per-VM firewall, outside the guest. `i
 
 Capture needs `tcpdump` on the Proxmox host. Captures are written to `~/.local/share/vmhub/captures/` (`VMHUB_CAPTURE_DIR`).
 
+## Workstation setup (control plane on the Proxmox host)
+
+`deploy/host-install.sh` runs vmhub-lite and the reaper on the Proxmox host (lite binds the host's 127.0.0.1:8787). On the workstation, `scripts/vmhub-mcp-remote.sh` forwards a local port to that lite over SSH and execs the stdio server, so an MCP client only needs one command:
+
+```sh
+bun build src/mcp/index.ts --compile --outfile ~/.local/bin/vmhub-mcp-server
+install -m 0755 scripts/vmhub-mcp-remote.sh ~/.local/bin/vmhub-mcp
+claude mcp add -s user vmhub -- ~/.local/bin/vmhub-mcp
+```
+
+It reads `~/.config/vmhub/ssh_config`, which needs a `Host vmhub-host` entry for the Proxmox host and a `Host 10.10.10.*` entry with the key the goldens trust. Build the host binaries with `--target=bun-linux-x64-baseline` when the host CPU lacks AVX2.
+
 ## Reaching the host
 
 Every VM connection hops through the Proxmox host over SSH; nothing needs a route to the guest network (10.10.10.0/24). Windows (CursorTouch :8000) and Android (adb :5555) go through `ssh -L` tunnels the adapters manage.
