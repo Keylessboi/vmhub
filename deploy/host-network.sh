@@ -9,6 +9,11 @@ set -euo pipefail
 SUBNET=${VMHUB_GUEST_SUBNET:-10.10.10.0/24}
 UPLINK=${VMHUB_UPLINK:-vmbr0}
 RULE="-s $SUBNET -o $UPLINK -j MASQUERADE"
+# With the PVE per-VM firewall on, guest frames cross the fwbr* firewall
+# bridges under bridge netfilter first; conntrack would settle "no NAT"
+# there, before the routed hop to $UPLINK. A separate conntrack zone for
+# fwbr* traffic lets MASQUERADE apply (Proxmox's documented fix).
+ZONE="PREROUTING -i fwbr+ -j CT --zone 1"
 
 sysctl -qw net.ipv4.ip_forward=1
 if iptables -t nat -C POSTROUTING $RULE 2>/dev/null; then
@@ -16,6 +21,13 @@ if iptables -t nat -C POSTROUTING $RULE 2>/dev/null; then
 else
   iptables -t nat -A POSTROUTING $RULE
   echo "NAT rule applied live"
+fi
+
+if iptables -t raw -C $ZONE 2>/dev/null; then
+  echo "conntrack zone rule already live"
+else
+  iptables -t raw -I $ZONE
+  echo "conntrack zone rule applied live"
 fi
 
 IF=/etc/network/interfaces
@@ -34,4 +46,12 @@ else
   mv "$IF.new" "$IF"
   echo "NAT rule persisted in $IF"
 fi
+if ! grep -q -- "--zone 1" "$IF"; then
+  cp -a "$IF" "$IF.bak-$(date +%Y%m%d%H%M%S)"
+  awk -v up="    post-up   iptables -t raw -I $ZONE" -v down="    post-down iptables -t raw -D $ZONE" '
+    { print }
+    /post-up +iptables -t nat -A POSTROUTING .*MASQUERADE/ { print up; print down }
+  ' "$IF" > "$IF.new" && grep -q -- "--zone 1" "$IF.new" && mv "$IF.new" "$IF" && echo "conntrack zone rule persisted in $IF"
+fi
 iptables -t nat -S POSTROUTING | grep -- "$SUBNET"
+iptables -t raw -S PREROUTING | grep -- "fwbr"

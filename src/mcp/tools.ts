@@ -1040,7 +1040,7 @@ function registerLabTools(server: McpServer, deps: McpDeps): void {
     {
       title: 'Get or set the VM network policy',
       description:
-        'Enforced by the Proxmox firewall outside the guest. mode "internet": outbound internet only — the LAN, the tailnet and other lease VMs are unreachable. mode "isolated": no outbound traffic at all (DNS included); the VM can still be driven. Omit mode to read the current policy. "enforced":false means the host firewall is off and the policy is NOT protecting anything.',
+        'Enforced by the Proxmox firewall outside the guest. mode "internet": outbound internet only — the LAN, the tailnet and other lease VMs are unreachable. mode "isolated": no outbound traffic at all (DNS included); the VM can still be driven. Omit mode to read the current policy. "enforced":false means the host firewall is off and the policy is NOT protecting anything. A change takes ~12s (the call waits until it is in force). Connections already open before switching to isolated can survive the switch — for untrusted samples lease with network:"isolated" from the start instead of switching later.',
       inputSchema: z.object({
         vm_id: z.string().describe('VM uuid from the lease'),
         mode: z.enum(['internet', 'isolated']).optional(),

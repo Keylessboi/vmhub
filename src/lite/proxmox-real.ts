@@ -360,8 +360,11 @@ export class RealProxmox implements ProxmoxClient {
     try {
       if ((await this.status(vmid)) === "running") {
         // Proxmox refuses to delete a running VM — stop it first, then delete.
-        await this.request("POST", `/nodes/${node}/qemu/${vmid}/status/stop`, {});
-        for (let i = 0; i < 30; i++) {
+        // stop is an async task: wait for it (a VM just rolled back or holding
+        // a snapshot lock can take well over 30s), then confirm the state.
+        const upid = await this.request("POST", `/nodes/${node}/qemu/${vmid}/status/stop`, { timeout: 60 });
+        await this.waitTask(upid, 120_000);
+        for (let i = 0; i < 60; i++) {
           if ((await this.status(vmid)) !== "running") break;
           await new Promise((r) => setTimeout(r, 1000));
         }
@@ -465,6 +468,14 @@ export class RealProxmox implements ProxmoxClient {
     const tag = rules.map((r) => r.comment ?? "").find((c) => c.startsWith("vmhub:mode="));
     if (!tag || Number(opts?.enable) !== 1) return { mode: "unmanaged", enforced: false, reason: "no vmhub policy applied to this VM" };
     const mode = tag.slice("vmhub:mode=".length).split(" ")[0] as NetworkMode;
+    // pve-firewall compiles rule changes on a ~10s cycle, so a running VM
+    // keeps its old policy until then (measured: internet→isolated still let
+    // traffic out at +0s, blocked at +12s). Do not report a mode before it
+    // is in force. A stopped VM picks the rules up before its NIC exists.
+    const settleMs = Number(process.env.VMHUB_FIREWALL_SETTLE_MS ?? 12_000);
+    if (settleMs > 0 && (await this.status(vmid)) === "running") {
+      await new Promise((r) => setTimeout(r, settleMs));
+    }
     const dc = await this.datacenterFirewall();
     return { mode, enforced: dc.enabled, reason: dc.reason };
   }

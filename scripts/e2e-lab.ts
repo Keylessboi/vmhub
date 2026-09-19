@@ -71,13 +71,13 @@ try {
 
   const cap = await call('vm_capture', { vm_id: vmId, action: 'start' });
   check('vm_capture start', cap.ok, cap);
-  await call('vm_exec', { vm_id: vmId, command: 'getent hosts example.org; curl -s -m 8 -o /dev/null https://example.org; curl -s -m 8 -o /dev/null http://neverssl.com/; timeout 4 bash -c "</dev/tcp/192.168.1.1/445"; true', timeout_s: 40 });
+  await call('vm_exec', { vm_id: vmId, command: 'getent hosts example.org; curl -s -m 8 -o /dev/null https://example.org; curl -s -m 8 -o /dev/null http://example.com/; timeout 4 bash -c "</dev/tcp/192.168.1.1/445"; true', timeout_s: 40 });
   await new Promise((r) => setTimeout(r, 1500));
   const stop = await call('vm_capture', { vm_id: vmId, action: 'stop' });
   const sum = stop.result?.summary;
   check('capture sees the DNS lookup', !!sum?.dnsQueries?.some((q: any) => q.name === 'example.org'), stop);
   check('capture sees the TLS server name', !!sum?.tlsServerNames?.includes('example.org'), sum?.tlsServerNames);
-  check('capture sees the HTTP request', !!sum?.httpRequests?.some((h: string) => h.includes('neverssl.com')), sum?.httpRequests);
+  check('capture sees the HTTP request', !!sum?.httpRequests?.some((h: string) => h.includes('example.com')), sum?.httpRequests);
   check('capture marks the LAN attempt unanswered', !!sum?.flows?.some((f: any) => f.dst === '192.168.1.1' && f.unanswered === true), sum?.flows);
 
   const iso = await call('vm_network', { vm_id: vmId, mode: 'isolated' });

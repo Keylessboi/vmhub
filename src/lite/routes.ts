@@ -31,6 +31,7 @@
 import { statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { ProxmoxClient } from "./proxmox.ts";
+import { MockProxmox } from "./proxmox.ts";
 import { proxmoxDiskFreePercent } from "./proxmox.ts";
 import { isVmError, vmError } from "../mcp/errors.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
@@ -256,6 +257,12 @@ async function applyInitialNetwork(client: ProxmoxClient, vmid: number, net: Ini
   if (!net.mode) return;
   try {
     const policy = await client.setNetworkPolicy(vmid, net.mode);
+    // An explicit mode is a hard requirement: hold first boot until the
+    // host firewall has compiled the new VM's rules (~10s cycle).
+    const settleMs = Number(process.env.VMHUB_FIREWALL_SETTLE_MS ?? 12_000);
+    if (net.required && settleMs > 0 && !(client instanceof MockProxmox)) {
+      await new Promise((r) => setTimeout(r, settleMs));
+    }
     if (net.required && !policy.enforced) {
       throw vmError("PROVISION_FAILED", `network '${net.mode}' requested but not enforced: ${policy.reason ?? "unknown"}`);
     }
