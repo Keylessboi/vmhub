@@ -1,5 +1,27 @@
 # Golden VM build recipes (2026-08-14)
 
+## Live status (2026-09-19, `scripts/e2e-lab.ts` against the deployed control plane)
+
+| VMID | Golden | E2E | Notes |
+|---|---|---|---|
+| 2030 | debian-13-golden (headless) | all pass | exec, files, network policy, capture, snapshots |
+| 2060 | x11-2404 | all pass | needed `ciupgrade=0` on clones (see below) |
+| 2070 | hyprland-2404 | all pass | rebuilt with `wtype` (hyprland-mcp's typing/key backend); old image kept as stopped VM 9071 |
+| 2100 | windows-11-24h2 | **fails** | every clone spends 15+ min in "Getting devices ready" with heavy disk I/O, and CursorTouch is not listening afterwards (no autostart recorded in the build steps) |
+| 2110 | bliss-android16 | n/a | still a build VM, not a template — not leasable |
+
+**Clones boot with `ciupgrade=0`.** Proxmox defaults cloud-init to a full
+`dist-upgrade` on a clone's first boot. On the x11 golden that replaced
+`xserver-xorg-core` under the running session, so no clone had a display until
+its second boot. vmhub-lite now sets `ciupgrade=0` (opt back in with
+`VMHUB_GUEST_UPGRADE=1`); refresh goldens instead of upgrading every lease.
+
+**Rebuilding a golden without touching the live one:** `qm clone <golden> <staging> --full`,
+boot it, change it, then `apt-get clean; rm -f /var/lib/vmhub-golden-refreshed;
+cloud-init clean --logs; truncate -s0 /etc/machine-id`, power off, restore the
+golden's `ipconfig0`, `qm template <staging>`, run `scripts/e2e-lab.ts <staging>`,
+and only then swap it into the golden's VMID (keep a full-clone backup of the old one).
+
 How each golden template was built, the gotchas, and what a fresh clone needs.
 
 ## Shared base: debian-13-golden (VMID 2030)
@@ -39,6 +61,9 @@ Built from debian-13-golden. Critical learnings (all cost real time):
    ```
 6. **Hyprland config** at /home/vmuser/.config/hypr/hyprland.conf (minimal:
    no animations, border colors, wl-clipboard watch).
+7. **`wtype`** (`apt-get install wtype`) — hyprland-mcp's input_type/input_key
+   backend. Missing from the first build; every typing call failed with
+   "wtype not found" until the 2026-09-19 rebuild.
 
 ### Verified transport (the full adapter path)
 Desktop → `ssh -T -o ProxyJump=root@192.168.1.220 root@<vm-ip>
