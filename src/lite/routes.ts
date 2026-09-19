@@ -457,17 +457,7 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
         );
       }
     }
-    const probe = await ctx.proxmox.probeCapabilities(pvm.vmid);
-    if (!probe.available) {
-      ctx.db.deleteVm(uuid);
-      await ctx.proxmox.destroyVm(pvm.vmid);
-      throw vmError(
-        "CAPABILITY_UNAVAILABLE",
-        `template '${templateId}' probe failed: ${probe.reason}`,
-        probe.reason,
-      );
-    }
-    ctx.db.updateVmStatus(uuid, "ready");
+    await settleReadiness(ctx, ctx.proxmox, uuid, pvm.vmid, templateId);
   };
 
   if (useLockedCreate) {
@@ -628,17 +618,7 @@ async function createRoutedLease(
               );
         }
       }
-      const probe = await client.probeCapabilities(pvm.vmid);
-      if (!probe.available) {
-        ctx.db.deleteVm(uuid);
-        await client.destroyVm(pvm.vmid);
-        throw vmError(
-          "CAPABILITY_UNAVAILABLE",
-          `template '${tpl.id}' probe failed: ${probe.reason}`,
-          probe.reason,
-        );
-      }
-      ctx.db.updateVmStatus(uuid, "ready");
+      await settleReadiness(ctx, client, uuid, pvm.vmid, tpl.id);
     });
   } else {
     const pvm = await ctx.nodeLock.run(nodeId, async () => {
@@ -681,18 +661,9 @@ async function createRoutedLease(
             );
       }
     }
-    const probe = await client.probeCapabilities(pvm.vmid);
-    if (!probe.available) {
-      await client.destroyVm(pvm.vmid);
-      throw vmError(
-        "CAPABILITY_UNAVAILABLE",
-        `template '${tpl.id}' probe failed: ${probe.reason}`,
-        probe.reason,
-      );
-    }
-    vm.status = USE_PROVISIONING ? "provisioning" : "ready";
+    vm.status = USE_PROVISIONING ? "provisioning" : "starting";
     ctx.db.insertVm(vm);
-    ctx.db.updateVmStatus(uuid, "ready");
+    await settleReadiness(ctx, client, uuid, pvm.vmid, tpl.id);
   }
 
   try {
@@ -898,6 +869,50 @@ function statSize(path: string): number {
   }
 }
 
+
+/** How long lease creation waits inline for the guest before finishing in the background. */
+const READY_INLINE_MS = 5_000;
+
+/**
+ * Mark the VM ready once the guest has booted. Quick guests (and the mock)
+ * finish inline; slow ones (Windows takes minutes) finish in the background
+ * so the create request returns promptly — the MCP side already polls
+ * vm_lease_status until the status is ready/error. A failed probe marks the
+ * VM "error" rather than destroying a VM that is already leased.
+ */
+async function settleReadiness(
+  ctx: ResolvedDeps,
+  client: ProxmoxClient,
+  uuid: string,
+  vmid: number,
+  templateId: string,
+): Promise<void> {
+  let inline = true;
+  const done = (async (): Promise<{ available: boolean; reason?: string }> => {
+    try {
+      const probe = await client.probeCapabilities(vmid);
+      if (!inline && ctx.db.getVm(uuid)) {
+        ctx.db.updateVmStatus(uuid, probe.available ? "ready" : "error");
+        if (!probe.available) console.error(`[lite] vm ${vmid} not ready: ${probe.reason}`);
+      }
+      return probe;
+    } catch (err) {
+      if (!inline && ctx.db.getVm(uuid)) ctx.db.updateVmStatus(uuid, "error");
+      console.error(`[lite] readiness check for vm ${vmid} failed: ${describeError(err)}`);
+      return { available: false, reason: describeError(err) };
+    }
+  })();
+  const inlineResult = await Promise.race([done, new Promise<null>((r) => setTimeout(() => r(null), READY_INLINE_MS))]);
+  inline = false;
+  if (inlineResult === null) return; // still booting — finishes in the background
+  if (!inlineResult.available) {
+    // Failed straight away: the caller hears about it now, nothing is left behind.
+    ctx.db.deleteVm(uuid);
+    await client.destroyVm(vmid);
+    throw vmError("CAPABILITY_UNAVAILABLE", `template '${templateId}' probe failed: ${inlineResult.reason}`, inlineResult.reason);
+  }
+  ctx.db.updateVmStatus(uuid, "ready");
+}
 
 // ---------------------------------------------------------------------------
 // Snapshots + network policy (the lab controls)
