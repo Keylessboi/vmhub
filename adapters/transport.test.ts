@@ -4,7 +4,7 @@
  * MCP transport wiring. No live SSH or host needed.
  */
 import { describe, expect, it } from 'vitest';
-import { scpRemote, scpVmArgs, sshHostArgs, sshIntoVmArgs, sshJumpTarget, vmSshMcpTransport, vmSshUser, vmTunnel } from './transport.ts';
+import { jumpHostOpts, scpRemote, scpVmArgs, sshHostArgs, sshIntoVmArgs, sshJumpTarget, vmSshMcpTransport, vmSshUser, vmTunnel } from './transport.ts';
 import type { Vm } from '../src/shared/types.ts';
 
 const vm: Vm = {
@@ -87,6 +87,11 @@ describe('scp helpers', () => {
 });
 
 describe('vmTunnel', () => {
+  it('does not multiplex the forward (a multiplexed -L exits immediately)', () => {
+    expect(jumpHostOpts({}, false).join(' ')).not.toContain('ControlMaster');
+    expect(jumpHostOpts({}, true).join(' ')).toContain('ControlMaster=auto');
+  });
+
   it('returns the guest address directly when the guest network is routable', async () => {
     await expect(vmTunnel(vm, 8000, { VMHUB_DIRECT_GUEST_NET: '1' })).resolves.toEqual({ host: '10.10.10.50', port: 8000 });
   });

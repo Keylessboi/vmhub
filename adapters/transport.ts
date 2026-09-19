@@ -58,9 +58,9 @@ function commonOpts(env: NodeJS.ProcessEnv): string[] {
  * (ControlMaster) so each tool call does not pay a fresh handshake — over a
  * relayed Tailscale path that is the difference between 0.2s and 3s.
  */
-export function jumpHostOpts(env: NodeJS.ProcessEnv = process.env): string[] {
+export function jumpHostOpts(env: NodeJS.ProcessEnv = process.env, multiplex = true): string[] {
   const opts = [...commonOpts(env), '-o', 'StrictHostKeyChecking=accept-new'];
-  if (env.VMHUB_SSH_MULTIPLEX !== '0') {
+  if (multiplex && env.VMHUB_SSH_MULTIPLEX !== '0') {
     const dir = env.VMHUB_SSH_CONTROL_DIR ?? `${homedir()}/.ssh`;
     opts.push('-o', 'ControlMaster=auto', '-o', `ControlPath=${dir}/vmhub-%C`, '-o', 'ControlPersist=10m');
   }
@@ -194,15 +194,19 @@ export async function vmTunnel(vm: Vm, remotePort: number, env: NodeJS.ProcessEn
   }
   live?.child.kill();
   const localPort = await freePort();
-  const child = spawn('ssh', ['-N', ...jumpHostOpts(env), '-o', 'ExitOnForwardFailure=yes',
-    '-L', `127.0.0.1:${localPort}:${ip}:${remotePort}`, sshJumpTarget(env)], { stdio: ['ignore', 'ignore', 'pipe'] });
+  // No multiplexing here: a multiplexed `ssh -L` hands the forward to the
+  // master and exits 0 immediately, so the child is neither a liveness signal
+  // nor something we could kill to close the tunnel. This child owns it.
+  const child = spawn('ssh', ['-N', ...jumpHostOpts(env, false), '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
+    '-o', 'ExitOnForwardFailure=yes', '-L', `127.0.0.1:${localPort}:${ip}:${remotePort}`, sshJumpTarget(env)],
+    { stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '';
   child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
   tunnels.set(key, { localPort, child });
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) break;
     if (await portOpen(localPort)) return { host: '127.0.0.1', port: localPort };
+    if (child.exitCode !== null) break;
     await new Promise((r) => setTimeout(r, 250));
   }
   child.kill();

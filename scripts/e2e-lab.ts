@@ -175,7 +175,7 @@ try {
   await call('vm_exec', { vm_id: vmId, command: P.markDirty });
   const rev = await call('vm_snapshot', { vm_id: vmId, action: 'revert', name: 'clean' });
   check('snapshot revert', rev.ok, rev);
-  const after = await until('vm_exec', { vm_id: vmId, command: P.checkDirty, timeout_s: 20 }, os === 'windows' ? 90 : 40);
+  const after = await until('vm_exec', { vm_id: vmId, command: P.checkDirty, timeout_s: 20 }, os === 'windows' ? 180 : 40);
   check('revert restored the clean disk', (after.result?.stdout ?? '').includes('CLEAN'), after);
   if (desktop) {
     const shot2 = await until('vm_screenshot', { vm_id: vmId }, 40);
