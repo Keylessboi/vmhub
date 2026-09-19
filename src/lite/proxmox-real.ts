@@ -270,6 +270,11 @@ export class RealProxmox implements ProxmoxClient {
       // tailnet search domain. Lease VMs get public resolvers instead.
       nameserver: guestDns(),
       searchdomain: "vmhub.invalid",
+      // Proxmox defaults ciupgrade=1: every clone runs a full dist-upgrade on
+      // first boot, which replaced xserver-xorg-core under the running x11
+      // session (no display until the next boot), slows every lease and
+      // makes runs non-reproducible. Leases boot exactly what the golden has.
+      ciupgrade: process.env.VMHUB_GUEST_UPGRADE === "1" ? 1 : 0,
     });
     const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string };
     const tags = this.parseTags(config);
