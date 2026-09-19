@@ -45,7 +45,10 @@ export function sshJumpTarget(env: NodeJS.ProcessEnv = process.env): string {
 
 /** Options shared by every hop: never prompt, fail fast, notice dead links. */
 function commonOpts(env: NodeJS.ProcessEnv): string[] {
-  const opts = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4'];
+  // A dedicated ssh_config lets each hop use its own key/route (e.g. reach
+  // the host through a LAN jump, guests with the golden's key).
+  const opts = env.VMHUB_SSH_CONFIG ? ['-F', env.VMHUB_SSH_CONFIG] : [];
+  opts.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4');
   if (env.VMHUB_SSH_KEY) opts.push('-i', env.VMHUB_SSH_KEY, '-o', 'IdentitiesOnly=yes');
   return opts;
 }

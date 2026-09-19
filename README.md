@@ -162,6 +162,7 @@ Every VM connection hops through the Proxmox host over SSH; nothing needs a rout
 | `VMHUB_JUMP_USER` | `VMHUB_SSH_USER`, then `root` | User on the Proxmox host (tcpdump needs root). |
 | `VMHUB_SSH_USER` | `root` | User inside Linux guests. |
 | `VMHUB_SSH_KEY` | ssh default | Identity file used for both hops. |
+| `VMHUB_SSH_CONFIG` | none | An ssh_config passed with `-F` to every hop — per-host keys, or a `ProxyCommand` to reach the host. |
 | `VMHUB_SSH_MULTIPLEX` | on | Set `0` to disable the ControlMaster on the jump hop. |
 | `VMHUB_DIRECT_GUEST_NET` | off | Set `1` when this machine routes the guest network itself (e.g. vmhub-mcp on the host); skips tunnels. |
 

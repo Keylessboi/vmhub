@@ -55,6 +55,12 @@ describe('sshIntoVmArgs', () => {
     expect(args.find((a) => a.startsWith('ProxyCommand='))).toContain('-i /k/worker_key');
   });
 
+  it('applies VMHUB_SSH_CONFIG to every hop', () => {
+    const args = sshIntoVmArgs(vm, { VMHUB_SSH_CONFIG: '/c/ssh_config', VMHUB_JUMP_HOST: 'vmhub' });
+    expect(args.slice(1, 3)).toEqual(['-F', '/c/ssh_config']);
+    expect(args.find((a) => a.startsWith('ProxyCommand='))).toMatch(/^ProxyCommand=ssh -F \/c\/ssh_config .* root@vmhub$/);
+  });
+
   it('multiplexes the jump hop unless disabled', () => {
     expect(sshHostArgs({}).join(' ')).toContain('ControlMaster=auto');
     expect(sshHostArgs({ VMHUB_SSH_MULTIPLEX: '0' }).join(' ')).not.toContain('ControlMaster');
