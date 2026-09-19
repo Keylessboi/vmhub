@@ -5,7 +5,7 @@
  * Live-server behavior is exercised e2e against the golden, not here.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { CURSORTOUCH_PORT, WindowsAdapter, textContent, pngDimensions } from '../windows/index.ts';
+import { CURSORTOUCH_PORT, WindowsAdapter, textContent, pngDimensions, SHELL_TOOL_PATTERN, psq, wrapPowerShell, parseShellReply } from '../windows/index.ts';
 import type { Vm } from '../../src/shared/types.ts';
 
 const adapter = new WindowsAdapter();
@@ -30,10 +30,10 @@ describe('WindowsAdapter capability declaration', () => {
     expect(adapter.capability.windowing).toEqual(['windows']);
   });
 
-  it('declares input + no exec (exec goes through PowerShell tool)', () => {
+  it('declares input + exec and file transfer through the PowerShell tool', () => {
     expect(adapter.capability.input).toEqual(['click', 'type', 'key', 'paste', 'drag']);
-    expect(adapter.capability.exec).toBe(false);
-    expect(adapter.capability.files).toEqual([]);
+    expect(adapter.capability.exec).toBe(true);
+    expect(adapter.capability.files).toEqual(['powershell']);
   });
 
   it('notes the transport in the capability', () => {
@@ -49,8 +49,31 @@ describe('WindowsAdapter availableTools', () => {
     }
   });
 
-  it('does not advertise exec (not served)', () => {
-    expect(adapter.availableTools()).not.toContain('exec');
+  it('advertises exec and file transfer, not clone_repo', () => {
+    for (const t of ['exec', 'put_file', 'get_file']) expect(adapter.availableTools()).toContain(t);
+    expect(adapter.availableTools()).not.toContain('clone_repo');
+  });
+});
+
+describe('PowerShell exec plumbing', () => {
+  it('finds the shell tool under every CursorTouch name', () => {
+    for (const n of ['Shell', 'Powershell', 'PowerShell', 'Powershell-Tool']) expect(SHELL_TOOL_PATTERN.test(n)).toBe(true);
+    for (const n of ['App', 'Screenshot', 'Shortcut']) expect(SHELL_TOOL_PATTERN.test(n)).toBe(false);
+  });
+
+  it('quotes PowerShell literals', () => {
+    expect(psq("C:\\it's")).toBe("'C:\\it''s'");
+  });
+
+  it('wraps a command so the exit code survives', () => {
+    const w = wrapPowerShell('Get-Process', 'C:\\tmp');
+    expect(w).toContain("Set-Location -LiteralPath 'C:\\tmp'");
+    expect(w).toContain('"__vmhub_rc=$LASTEXITCODE"');
+  });
+
+  it('parses the sentinel exit code out of the reply', () => {
+    expect(parseShellReply('Response: hello\nworld\n__vmhub_rc=3\nStatus Code: 0')).toEqual({ exitCode: 3, output: 'hello\nworld' });
+    expect(parseShellReply('Response: plain\nStatus Code: 1')).toEqual({ exitCode: 1, output: 'plain' });
   });
 });
 

@@ -18,6 +18,7 @@ import { promisify } from 'node:util';
 import type {
   CapabilityId,
   DesktopAdapter,
+  ExecOptions,
   ExecResult,
   FileCapability,
   InputAction,
@@ -30,6 +31,8 @@ import type {
 } from '../../src/shared/types.ts';
 import { CAPABILITIES } from '../../src/shared/types.ts';
 import { vmError } from '../../src/mcp/errors.ts';
+import { closeVmTunnels, vmTunnel } from '../transport.ts';
+import { runBounded, shq } from '../ssh-ops.ts';
 
 const execFileP = promisify(execFile);
 
@@ -49,7 +52,8 @@ export class AndroidAdapter implements DesktopAdapter {
     notes: 'Android via host-side ADB over the VM network (android-9-golden).',
   };
 
-  private connected = new Set<string>();
+  /** vm uuid -> adb serial (host:port of the tunnel endpoint). */
+  private serials = new Map<string, string>();
 
   availableTools(): CapabilityId[] {
     return [
@@ -63,30 +67,41 @@ export class AndroidAdapter implements DesktopAdapter {
       CAPABILITIES.drag,
       CAPABILITIES.launch,
       CAPABILITIES.exec,
+      CAPABILITIES.putFile,
+      CAPABILITIES.getFile,
     ];
   }
 
-  /** Connect to the VM's adbd. No-op if already connected. */
-  private async ensureConnected(vm: Vm): Promise<void> {
-    if (this.connected.has(vm.uuid)) return;
+  /**
+   * Connect to the VM's adbd through an SSH tunnel (the guest network is
+   * not routable from the MCP host) and return the adb serial. Every adb
+   * call passes `-s <serial>` — without it adb refuses as soon as a second
+   * device (another lease, a phone) is attached.
+   */
+  private async ensureConnected(vm: Vm): Promise<string> {
+    const known = this.serials.get(vm.uuid);
+    if (known) return known;
     if (!vm.ip) throw vmError('INTERNAL', 'android adapter: VM has no IP (not leased?)', 'Lease the VM first');
-    const target = `${vm.ip}:${process.env.ADB_PORT ?? ADB_PORT}`;
+    const { host, port } = await vmTunnel(vm, Number(process.env.ADB_PORT ?? ADB_PORT));
+    const serial = `${host}:${port}`;
     try {
-      await execFileP('adb', ['connect', target]);
-      this.connected.add(vm.uuid);
+      const { stdout } = await execFileP('adb', ['connect', serial]);
+      if (/unable|failed|cannot/i.test(stdout)) throw new Error(stdout.trim());
+      this.serials.set(vm.uuid, serial);
+      return serial;
     } catch (e) {
       throw vmError(
         'INTERNAL',
-        `android adapter: adb connect ${target} failed (${e instanceof Error ? e.message : String(e)})`,
+        `android adapter: adb connect ${serial} failed (${e instanceof Error ? e.message : String(e)})`,
         'Ensure adb is installed and the Android golden has ADB-over-network enabled (:5555).',
       );
     }
   }
 
   private async adb(vm: Vm, args: string[]): Promise<string> {
-    await this.ensureConnected(vm);
+    const serial = await this.ensureConnected(vm);
     try {
-      const { stdout } = await execFileP('adb', args);
+      const { stdout } = await execFileP('adb', ['-s', serial, ...args], { maxBuffer: 64 * 1024 * 1024 });
       return stdout;
     } catch (e) {
       throw vmError(
@@ -97,10 +112,17 @@ export class AndroidAdapter implements DesktopAdapter {
     }
   }
 
+  /** Binary adb exec-out (screencap) with the VM's serial. */
+  private async adbOut(vm: Vm, args: string[]): Promise<Buffer> {
+    const serial = await this.ensureConnected(vm);
+    const { stdout } = await execFileP('adb', ['-s', serial, 'exec-out', ...args], { encoding: 'buffer' as const, maxBuffer: 64 * 1024 * 1024 });
+    return stdout;
+  }
+
   async screenshot(vm: Vm): Promise<ScreenshotResult> {
     await this.ensureConnected(vm);
     // screencap emits binary PNG — request a Buffer, not a string.
-    const { stdout } = await execFileP('adb', ['exec-out', 'screencap', '-p'], { encoding: 'buffer' as const });
+    const stdout = await this.adbOut(vm, ['screencap', '-p']);
     return {
       image: stdout,
       format: 'png',
@@ -142,7 +164,7 @@ export class AndroidAdapter implements DesktopAdapter {
 
   async inspect(vm: Vm): Promise<SemanticElement> {
     await this.adb(vm, ['shell', 'uiautomator', 'dump', '/sdcard/window_dump.xml']);
-    const { stdout } = await execFileP('adb', ['exec-out', 'cat', '/sdcard/window_dump.xml']);
+    const stdout = (await this.adbOut(vm, ['cat', '/sdcard/window_dump.xml'])).toString('utf8');
     return {
       role: 'screen',
       name: 'Android screen (uiautomator)',
@@ -152,9 +174,36 @@ export class AndroidAdapter implements DesktopAdapter {
     };
   }
 
-  async exec(vm: Vm, cmd: string, args?: string[]): Promise<ExecResult> {
-    const stdout = await this.adb(vm, ['shell', cmd, ...(args ?? [])]);
-    return { exitCode: 0, stdout, stderr: '' };
+  /**
+   * adb shell with the real exit code (plain `adb shell` exits 0 on old
+   * adbd), bounded output and timeout.
+   */
+  async exec(vm: Vm, cmd: string, args: string[] = [], opts: ExecOptions = {}): Promise<ExecResult> {
+    const serial = await this.ensureConnected(vm);
+    const full = [cmd, ...args.map(shq)].join(' ');
+    const script = opts.cwd ? `cd ${shq(opts.cwd)} && ${full}` : full;
+    const res = await runBounded('adb', ['-s', serial, 'shell', `${script}; echo "__vmhub_rc=$?"`], {
+      timeoutMs: opts.timeoutMs ?? 120_000,
+      stdin: opts.stdin,
+      outputCap: opts.outputCap ?? 200_000,
+    });
+    const m = /__vmhub_rc=(\d+)\s*$/.exec(res.stdout);
+    return { ...res, exitCode: m ? Number(m[1]) : res.exitCode, stdout: m ? res.stdout.slice(0, m.index) : res.stdout };
+  }
+
+  async putFile(vm: Vm, localPath: string, remotePath: string): Promise<void> {
+    await this.adb(vm, ['push', localPath, remotePath]);
+  }
+
+  async getFile(vm: Vm, remotePath: string, localPath: string): Promise<void> {
+    await this.adb(vm, ['pull', remotePath, localPath]);
+  }
+
+  releaseConnection(vm: Vm): void {
+    const serial = this.serials.get(vm.uuid);
+    if (serial) execFile('adb', ['disconnect', serial], () => {});
+    this.serials.delete(vm.uuid);
+    closeVmTunnels(vm);
   }
 
   async dispatch(vm: Vm, verb: string, args: Record<string, unknown>): Promise<unknown> {

@@ -13,6 +13,8 @@
 import type {
   CapabilityId,
   DesktopAdapter,
+  ExecOptions,
+  ExecResult,
   FileCapability,
   InputAction,
   InputCapability,
@@ -24,7 +26,9 @@ import type {
 } from '../../src/shared/types.ts';
 import { CAPABILITIES } from '../../src/shared/types.ts';
 import { vmError } from '../../src/mcp/errors.ts';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { closeVmTunnels, vmTunnel } from '../transport.ts';
 
 /** Default CursorTouch endpoint — override with CURSORTOUCH_PORT. */
 export const CURSORTOUCH_PORT = 8000;
@@ -37,6 +41,38 @@ export function cursorTouchAuthKey(env: NodeJS.ProcessEnv = process.env): string
 interface WindowsConnection {
   client: Client;
   transport: StreamableHTTPClientTransport;
+  /** Name of CursorTouch's PowerShell tool (renamed across versions), resolved once. */
+  shellTool?: string | null;
+}
+
+/** CursorTouch/Windows-MCP has shipped its shell tool as Shell, Powershell and Powershell-Tool. */
+export const SHELL_TOOL_PATTERN = /^(power)?shell(-tool)?$/i;
+
+/** Base64 characters per PowerShell call when moving files (well under the 32K command-line cap). */
+const FILE_CHUNK_B64 = 24_000;
+
+/** PowerShell single-quoted string literal. */
+export function psq(s: string): string {
+  return `'${s.replace(/'/g, "''")}'`;
+}
+
+/**
+ * Wrap a command so the exit code survives CursorTouch's text response:
+ * all streams merged, then a sentinel line with $LASTEXITCODE (or 1 when a
+ * terminating error was thrown).
+ */
+export function wrapPowerShell(cmd: string, cwd?: string): string {
+  const body = cwd ? `Set-Location -LiteralPath ${psq(cwd)}; ${cmd}` : cmd;
+  return `$global:LASTEXITCODE=0; try { & { ${body} } *>&1 | Out-String -Width 4096 } catch { $_ | Out-String; $global:LASTEXITCODE=1 }; "__vmhub_rc=$LASTEXITCODE"`;
+}
+
+/** Split CursorTouch's shell reply into output + exit code. */
+export function parseShellReply(text: string): { exitCode: number; output: string } {
+  const body = text.replace(/^Response:\s*/, '').replace(/\n?Status Code:\s*-?\d+\s*$/, '');
+  const m = /__vmhub_rc=(-?\d+)\s*$/.exec(body.trimEnd());
+  if (m) return { exitCode: Number(m[1]), output: body.trimEnd().slice(0, m.index).trimEnd() };
+  const code = /Status Code:\s*(-?\d+)/.exec(text);
+  return { exitCode: code ? Number(code[1]) : 0, output: body };
 }
 
 export class WindowsAdapter implements DesktopAdapter {
@@ -47,9 +83,9 @@ export class WindowsAdapter implements DesktopAdapter {
     windowing: ['windows'] as WindowingSystem[],
     input: ['click', 'type', 'key', 'paste', 'drag'] as InputCapability[],
     semantic: 'uia' as const,
-    files: [] as FileCapability[],
-    exec: false,
-    notes: 'Real Windows golden via in-VM CursorTouch (Windows-MCP) server.',
+    files: ['powershell'] as FileCapability[],
+    exec: true,
+    notes: 'Real Windows golden via in-VM CursorTouch (Windows-MCP) server; PowerShell for exec and chunked file transfer.',
   };
 
   private conns = new Map<string, WindowsConnection>();
@@ -67,6 +103,9 @@ export class WindowsAdapter implements DesktopAdapter {
       CAPABILITIES.launch,
       CAPABILITIES.focus,
       CAPABILITIES.close,
+      CAPABILITIES.exec,
+      CAPABILITIES.putFile,
+      CAPABILITIES.getFile,
     ];
   }
 
@@ -80,8 +119,8 @@ export class WindowsAdapter implements DesktopAdapter {
     if (!vm.ip) {
       throw vmError('INTERNAL', 'windows adapter: VM has no IP (not leased?)', 'Lease the VM first');
     }
-    const port = process.env.CURSORTOUCH_PORT ?? String(CURSORTOUCH_PORT);
-    const url = `http://${vm.ip}:${port}/mcp/`;
+    const ep = await vmTunnel(vm, Number(process.env.CURSORTOUCH_PORT ?? CURSORTOUCH_PORT));
+    const url = `http://${ep.host}:${ep.port}/mcp/`;
     const authKey = cursorTouchAuthKey();
     if (!authKey) {
       throw vmError('INTERNAL', 'windows adapter: CURSORTOUCH_AUTH_KEY not set', 'Set it via Doppler/environment');
@@ -201,8 +240,72 @@ export class WindowsAdapter implements DesktopAdapter {
     };
   }
 
-  async exec(): Promise<never> {
-    throw vmError('CAPABILITY_UNAVAILABLE', 'windows adapter: no exec path (use PowerShell tool via dispatch)');
+  private async shellTool(conn: WindowsConnection): Promise<string> {
+    if (conn.shellTool === undefined) {
+      const { tools } = await conn.client.listTools();
+      conn.shellTool = tools.find((t) => SHELL_TOOL_PATTERN.test(t.name))?.name ?? null;
+    }
+    if (!conn.shellTool) {
+      throw vmError('CAPABILITY_UNAVAILABLE', 'windows adapter: this CursorTouch build exposes no PowerShell tool');
+    }
+    return conn.shellTool;
+  }
+
+  private async ps(vm: Vm, script: string, timeoutMs = 120_000): Promise<{ exitCode: number; output: string }> {
+    const conn = await this.ensureConnection(vm);
+    const tool = await this.shellTool(conn);
+    const res = await conn.client.callTool(
+      { name: tool, arguments: { command: script, timeout: Math.ceil(timeoutMs / 1000) } },
+      { timeout: timeoutMs + 15_000 },
+    );
+    return parseShellReply(textContent(res.content as unknown[]) ?? '');
+  }
+
+  /** PowerShell via CursorTouch, with a real exit code. */
+  async exec(vm: Vm, cmd: string, args: string[] = [], opts: ExecOptions = {}): Promise<ExecResult> {
+    const t0 = Date.now();
+    const full = [cmd, ...args.map(psq)].join(' ');
+    const script = opts.detach
+      ? `$p = Start-Process -PassThru -WindowStyle Hidden powershell -ArgumentList '-NoProfile','-Command',${psq(full)} -RedirectStandardOutput "$env:TEMP\\vmhub-bg-$PID.log"; "pid=$($p.Id)"`
+      : full;
+    const { exitCode, output } = await this.ps(vm, wrapPowerShell(script, opts.cwd), opts.timeoutMs ?? 120_000);
+    const cap = opts.outputCap ?? 200_000;
+    return {
+      exitCode,
+      stdout: output.length > cap ? output.slice(-cap) : output,
+      stderr: '',
+      truncated: output.length > cap,
+      durationMs: Date.now() - t0,
+    };
+  }
+
+  /** Upload in base64 chunks through PowerShell (CursorTouch has no file channel). */
+  async putFile(vm: Vm, localPath: string, remotePath: string): Promise<void> {
+    const b64 = readFileSync(localPath).toString('base64');
+    for (let i = 0, first = true; first || i < b64.length; i += FILE_CHUNK_B64, first = false) {
+      const chunk = b64.slice(i, i + FILE_CHUNK_B64);
+      const mode = i === 0 ? 'Create' : 'Append';
+      const r = await this.ps(vm, wrapPowerShell(
+        `$b=[Convert]::FromBase64String('${chunk}'); $f=[IO.File]::Open(${psq(remotePath)},'${mode}'); $f.Write($b,0,$b.Length); $f.Close()`,
+      ));
+      if (r.exitCode !== 0) throw vmError('INTERNAL', `put_file ${remotePath} failed: ${r.output.slice(-500)}`);
+    }
+  }
+
+  async getFile(vm: Vm, remotePath: string, localPath: string): Promise<void> {
+    const size = await this.ps(vm, wrapPowerShell(`(Get-Item -LiteralPath ${psq(remotePath)}).Length`));
+    const total = Number(size.output.trim());
+    if (size.exitCode !== 0 || !Number.isFinite(total)) throw vmError('NOT_FOUND', `get_file: ${remotePath}: ${size.output.slice(-300)}`);
+    const chunkBytes = (FILE_CHUNK_B64 / 4) * 3;
+    const parts: Buffer[] = [];
+    for (let off = 0; off < total; off += chunkBytes) {
+      const r = await this.ps(vm, wrapPowerShell(
+        `$f=[IO.File]::OpenRead(${psq(remotePath)}); $f.Position=${off}; $b=New-Object byte[] ([Math]::Min(${chunkBytes}, $f.Length-${off})); [void]$f.Read($b,0,$b.Length); $f.Close(); [Convert]::ToBase64String($b)`,
+      ));
+      if (r.exitCode !== 0) throw vmError('INTERNAL', `get_file ${remotePath} failed at ${off}: ${r.output.slice(-300)}`);
+      parts.push(Buffer.from(r.output.trim(), 'base64'));
+    }
+    writeFileSync(localPath, Buffer.concat(parts));
   }
 
   async dispatch(vm: Vm, verb: string, args: Record<string, unknown>): Promise<unknown> {
@@ -218,6 +321,7 @@ export class WindowsAdapter implements DesktopAdapter {
       conn.transport.close().catch(() => {});
       this.conns.delete(vm.uuid);
     }
+    closeVmTunnels(vm);
   }
 }
 

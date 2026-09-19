@@ -12,7 +12,7 @@
  * only trustworthy identity; numeric VMIDs are internal. Linked clones carry
  * the tag; listVms filters to tagged VMs.
  */
-import type { Template, VmError } from "../shared/types.ts";
+import type { NetworkMode, NetworkPolicy, Template, VmError, VmSnapshot } from "../shared/types.ts";
 import { describeError } from "../shared/types.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 import type { CreateProxmoxVmInput, ProxmoxClient, ProxmoxVm, ProxmoxVmStatus } from "./proxmox.ts";
@@ -406,6 +406,131 @@ export class RealProxmox implements ProxmoxClient {
     const node = await this.node();
     const st = (await this.request("GET", `/nodes/${node}/storage/${await this.storageName()}/status`)) as { used?: number };
     return Number(st.used ?? 0);
+  }
+
+  /**
+   * Wait for an async Proxmox task (UPID) to finish; throw on failure.
+   * Snapshot/rollback return a UPID immediately and run in the background.
+   */
+  private async waitTask(upid: unknown, timeoutMs = 600_000): Promise<void> {
+    if (typeof upid !== "string" || !upid.startsWith("UPID:")) return;
+    const node = upid.split(":")[1] ?? (await this.node());
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const st = (await this.request("GET", `/nodes/${node}/tasks/${encodeURIComponent(upid)}/status`)) as { status?: string; exitstatus?: string };
+      if (st.status === "stopped") {
+        if (st.exitstatus && st.exitstatus !== "OK" && !st.exitstatus.startsWith("WARNINGS")) {
+          throw vmError("INTERNAL", `proxmox task failed: ${st.exitstatus}`, false, "no-retry");
+        }
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    throw vmError("BOOT_TIMEOUT", `proxmox task ${upid} still running after ${timeoutMs}ms`, true, "retry-with-backoff");
+  }
+
+  async listSnapshots(vmid: number): Promise<VmSnapshot[]> {
+    const node = await this.node();
+    const rows = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/snapshot`)) as {
+      name: string; description?: string; snaptime?: number; vmstate?: number; parent?: string;
+    }[];
+    return (rows ?? [])
+      .filter((r) => r.name !== "current")
+      .map((r) => ({
+        name: r.name,
+        description: r.description?.trim() || undefined,
+        createdAt: r.snaptime ? r.snaptime * 1000 : undefined,
+        withMemory: Number(r.vmstate) === 1,
+        parent: r.parent,
+      }))
+      .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+  }
+
+  async createSnapshot(vmid: number, name: string, opts: { description?: string; withMemory?: boolean } = {}): Promise<void> {
+    const node = await this.node();
+    const upid = await this.request("POST", `/nodes/${node}/qemu/${vmid}/snapshot`, {
+      snapname: name,
+      description: opts.description ?? "vmhub snapshot",
+      vmstate: opts.withMemory ? 1 : 0,
+    });
+    await this.waitTask(upid);
+  }
+
+  async rollbackSnapshot(vmid: number, name: string): Promise<void> {
+    const node = await this.node();
+    const upid = await this.request("POST", `/nodes/${node}/qemu/${vmid}/snapshot/${encodeURIComponent(name)}/rollback`, { start: 1 });
+    await this.waitTask(upid);
+    // Disk-only snapshots roll back to a stopped VM on older PVE; make sure it runs.
+    if ((await this.status(vmid)) !== "running") await this.startVm(vmid);
+  }
+
+  async deleteSnapshot(vmid: number, name: string): Promise<void> {
+    const node = await this.node();
+    const upid = await this.request("DELETE", `/nodes/${node}/qemu/${vmid}/snapshot/${encodeURIComponent(name)}`);
+    await this.waitTask(upid);
+  }
+
+  /** Datacenter firewall state: VM rules are inert unless it is enabled. */
+  private async datacenterFirewall(): Promise<{ enabled: boolean; reason?: string }> {
+    try {
+      const o = (await this.request("GET", `/cluster/firewall/options`)) as { enable?: number };
+      return Number(o?.enable) === 1 ? { enabled: true } : { enabled: false, reason: "datacenter firewall is disabled (Datacenter → Firewall → Options → Firewall: Yes)" };
+    } catch (e) {
+      return { enabled: false, reason: `cannot read datacenter firewall options: ${describeError(e)}` };
+    }
+  }
+
+  async getNetworkPolicy(vmid: number): Promise<NetworkPolicy> {
+    const node = await this.node();
+    const opts = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/firewall/options`)) as { enable?: number };
+    const rules = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/firewall/rules`)) as { comment?: string }[];
+    const tag = rules.map((r) => r.comment ?? "").find((c) => c.startsWith("vmhub:mode="));
+    if (!tag || Number(opts?.enable) !== 1) return { mode: "unmanaged", enforced: false, reason: "no vmhub policy applied to this VM" };
+    const mode = tag.slice("vmhub:mode=".length).split(" ")[0] as NetworkMode;
+    const dc = await this.datacenterFirewall();
+    return { mode, enforced: dc.enabled, reason: dc.reason };
+  }
+
+  async setNetworkPolicy(vmid: number, mode: NetworkMode, gw?: string): Promise<NetworkPolicy> {
+    const node = await this.node();
+    const gateway = gw ?? this.pool.config.gateway;
+    const base = `/nodes/${node}/qemu/${vmid}`;
+    // 1. The NIC must opt into the firewall bridge.
+    const config = (await this.request("GET", `${base}/config`)) as Record<string, string>;
+    const net0 = config.net0 ?? "";
+    if (!/(^|,)firewall=1(,|$)/.test(net0)) {
+      if (!net0) throw vmError("INTERNAL", `VM ${vmid} has no net0 to firewall`, false, "no-retry");
+      await this.request("POST", `${base}/config`, { net0: `${net0.replace(/(^|,)firewall=\d/, "")},firewall=1` });
+    }
+    // 2. Replace every vmhub-owned rule (highest position first so indexes stay valid).
+    const rules = (await this.request("GET", `${base}/firewall/rules`)) as { pos: number; comment?: string }[];
+    for (const r of [...rules].filter((r) => (r.comment ?? "").startsWith("vmhub:")).sort((a, b) => b.pos - a.pos)) {
+      await this.request("DELETE", `${base}/firewall/rules/${r.pos}`);
+    }
+    // Rules are inserted at pos 0, so add them in reverse of evaluation order.
+    const wanted: Record<string, unknown>[] = [];
+    wanted.push({ type: "in", action: "ACCEPT", source: gateway, comment: `vmhub:mode=${mode} host control path` });
+    if (mode === "internet") {
+      wanted.push({ type: "out", action: "ACCEPT", dest: gateway, proto: "udp", dport: "53", comment: "vmhub: dns via host" });
+      wanted.push({ type: "out", action: "ACCEPT", dest: gateway, proto: "tcp", dport: "53", comment: "vmhub: dns via host" });
+      for (const cidr of ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"]) {
+        wanted.push({ type: "out", action: "DROP", dest: cidr, comment: `vmhub: no private/tailnet ${cidr}` });
+      }
+    }
+    for (const rule of wanted.reverse()) {
+      await this.request("POST", `${base}/firewall/rules`, { ...rule, enable: 1, pos: 0 });
+    }
+    // 3. Policies: inbound only from the host; outbound per mode.
+    await this.request("PUT", `${base}/firewall/options`, {
+      enable: 1,
+      policy_in: "DROP",
+      policy_out: mode === "internet" ? "ACCEPT" : "DROP",
+      dhcp: 1,
+      ndp: 0,
+      radv: 0,
+    });
+    const dc = await this.datacenterFirewall();
+    return { mode, enforced: dc.enabled, reason: dc.reason };
   }
 
   /**

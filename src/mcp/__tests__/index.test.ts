@@ -24,10 +24,10 @@ describe('SERVER_NAME / SERVER_VERSION', () => {
 });
 
 describe('buildMcpServer', () => {
-  it('serves the full 23-tool surface', async () => {
+  it('serves the full 27-tool surface', async () => {
     const { client } = await connect();
     const tools = await client.listTools();
-    expect(tools.tools.length).toBe(23);
+    expect(tools.tools.length).toBe(27);
     const names = tools.tools.map((t) => t.name);
     for (const tool of ['vm_list_templates', 'vm_lease_create', 'vm_screenshot', 'vm_click', 'vm_lease_release', 'vm_list_vms']) {
       expect(names).toContain(tool);

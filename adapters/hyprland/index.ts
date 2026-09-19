@@ -21,6 +21,8 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import type {
   CapabilityId,
   DesktopAdapter,
+  ExecOptions,
+  ExecResult,
   FileCapability,
   InputAction,
   InputCapability,
@@ -33,6 +35,8 @@ import type {
 } from '../../src/shared/types.ts';
 import { CAPABILITIES } from '../../src/shared/types.ts';
 import { vmError } from '../../src/mcp/errors.ts';
+import { sshCloneRepo, sshExec, sshGetFile, sshPutFile } from '../ssh-ops.ts';
+
 import { vmSshMcpTransport } from '../transport.ts';
 
 /** Default compiled binary — override with HYPRLAND_MCP_BIN. */
@@ -79,9 +83,9 @@ export class HyprlandAdapter implements DesktopAdapter {
     windowing: ['hyprland'] as WindowingSystem[],
     input: ['click', 'type', 'key', 'paste', 'drag'] as InputCapability[],
     semantic: 'wayland' as const,
-    files: [] as FileCapability[],
-    exec: false,
-    notes: 'Host Hyprland desktop via the compiled hyprland-mcp binary.',
+    files: ['scp'] as FileCapability[],
+    exec: true,
+    notes: 'Hyprland desktop VM: in-VM hyprland-mcp for screen/input, SSH for shell and files.',
   };
 
   private conns = new Map<string, HyprlandConnection>();
@@ -100,6 +104,10 @@ export class HyprlandAdapter implements DesktopAdapter {
       CAPABILITIES.focus,
       CAPABILITIES.close,
       CAPABILITIES.dispatch,
+      CAPABILITIES.exec,
+      CAPABILITIES.putFile,
+      CAPABILITIES.getFile,
+      CAPABILITIES.cloneRepo,
     ];
   }
 
@@ -255,8 +263,21 @@ export class HyprlandAdapter implements DesktopAdapter {
     };
   }
 
-  async exec(_vm: Vm, _cmd: string, _args?: string[]): Promise<never> {
-    throw vmError('CAPABILITY_UNAVAILABLE', 'hyprland adapter: no exec path (hyprland-mcp has no exec tool)');
+  /** Shell in the VM over the same SSH hop as the MCP transport. */
+  async exec(vm: Vm, cmd: string, args: string[] = [], opts: ExecOptions = {}): Promise<ExecResult> {
+    return sshExec(vm, cmd, args, opts);
+  }
+
+  async putFile(vm: Vm, localPath: string, remotePath: string): Promise<void> {
+    return sshPutFile(vm, localPath, remotePath);
+  }
+
+  async getFile(vm: Vm, remotePath: string, localPath: string): Promise<void> {
+    return sshGetFile(vm, remotePath, localPath);
+  }
+
+  async cloneRepo(vm: Vm, repoUrl: string, destPath: string): Promise<void> {
+    return sshCloneRepo(vm, repoUrl, destPath);
   }
 
   /**

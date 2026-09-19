@@ -46,6 +46,7 @@ import type {
   Vm,
   VmError,
   VmNode,
+  NetworkMode,
 } from "../shared/types.ts";
 
 // ---------------------------------------------------------------------------
@@ -227,6 +228,44 @@ interface LeaseCreateBody {
   owner?: unknown;
   ttl_ms?: unknown;
   ttlMs?: unknown;
+  network?: unknown;
+}
+
+/**
+ * The network mode a new lease starts in. An explicit request is a hard
+ * requirement (the lease fails if it cannot be enforced — a malware sample
+ * must never get a moment of LAN access); the deployment default
+ * (VMHUB_DEFAULT_NETWORK, "internet" unless set to "unmanaged") is best-effort.
+ */
+interface InitialNetwork {
+  mode: NetworkMode | null;
+  required: boolean;
+}
+
+function parseInitialNetwork(value: unknown): InitialNetwork {
+  if (value === "internet" || value === "isolated") return { mode: value, required: true };
+  if (value !== undefined && value !== null) {
+    throw invalidRequest("'network' must be \"internet\" or \"isolated\"");
+  }
+  const dflt = process.env.VMHUB_DEFAULT_NETWORK ?? "internet";
+  return { mode: dflt === "internet" || dflt === "isolated" ? dflt : null, required: false };
+}
+
+/** Apply the lease's starting network policy before the VM first boots. */
+async function applyInitialNetwork(client: ProxmoxClient, vmid: number, net: InitialNetwork): Promise<void> {
+  if (!net.mode) return;
+  try {
+    const policy = await client.setNetworkPolicy(vmid, net.mode);
+    if (net.required && !policy.enforced) {
+      throw vmError("PROVISION_FAILED", `network '${net.mode}' requested but not enforced: ${policy.reason ?? "unknown"}`);
+    }
+  } catch (err) {
+    if (net.required) {
+      await client.destroyVm(vmid).catch(() => {});
+      throw err;
+    }
+    console.error(`[lite] default network policy not applied to vm ${vmid}: ${describeError(err)}`);
+  }
 }
 
 function firstString(...values: unknown[]): string | undefined {
@@ -294,6 +333,7 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
   const requestId = firstString(body.request_id, body.requestId, req.headers.get("x-request-id"));
   const templateId = firstString(body.template_id, body.templateId);
   const owner = typeof body.owner === "string" ? body.owner : "unknown";
+  const network = parseInitialNetwork(body.network);
 
   if (!requestId) {
     throw invalidRequest("'request_id' is required — it is the idempotency key");
@@ -332,7 +372,7 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
   // create the VM through that node's client. Single-node mode (no registry)
   // keeps the legacy path byte-identical.
   if (ctx.nodes && ctx.probe) {
-    return createRoutedLease(req, ctx, templates, tpl, requestId, owner, initialTtl);
+    return createRoutedLease(req, ctx, templates, tpl, requestId, owner, initialTtl, network);
   }
 
   const now = ctx.now();
@@ -374,6 +414,7 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
     });
     vm.vmid = pvm.vmid;
     vm.ip = pvm.ip;
+    await applyInitialNetwork(ctx.proxmox, pvm.vmid, network);
     ctx.db.insertVm(vm);
     try {
       await ctx.proxmox.startVm(pvm.vmid);
@@ -483,6 +524,7 @@ async function createRoutedLease(
   requestId: string,
   owner: string,
   initialTtl: number,
+  network: InitialNetwork,
 ): Promise<Response> {
   const now = ctx.now();
   const uuid = ctx.uuid();
@@ -555,6 +597,7 @@ async function createRoutedLease(
       });
       vm.vmid = pvm.vmid;
       vm.ip = pvm.ip;
+      await applyInitialNetwork(client, pvm.vmid, network);
       ctx.db.insertVm(vm);
       try {
         await client.startVm(pvm.vmid);
@@ -610,6 +653,7 @@ async function createRoutedLease(
     });
     vm.vmid = pvm.vmid;
     vm.ip = pvm.ip;
+    await applyInitialNetwork(client, pvm.vmid, network);
     try {
       await client.startVm(pvm.vmid);
     } catch (err) {
@@ -847,6 +891,67 @@ function statSize(path: string): number {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Snapshots + network policy (the lab controls)
+// ---------------------------------------------------------------------------
+
+const SNAPSHOT_NAME = /^[A-Za-z][A-Za-z0-9_-]{1,39}$/;
+
+/** The VM row + the client of the node it lives on; refuses VMs not yet cloned. */
+function vmAndClient(ctx: ResolvedDeps, uuid: string): { vm: VmRow; client: ProxmoxClient } {
+  const vm = ctx.db.getVm(uuid);
+  if (!vm) throw notFound(`vm '${uuid}' not found`);
+  if (!vm.vmid) throw invalidRequest(`vm '${uuid}' has no Proxmox VM yet (status ${vm.status})`);
+  return { vm, client: ctx.nodes?.client(vm.nodeId) ?? ctx.proxmox };
+}
+
+async function listSnapshots(_req: Request, ctx: ResolvedDeps, uuid: string): Promise<Response> {
+  const { vm, client } = vmAndClient(ctx, uuid);
+  return json(await client.listSnapshots(vm.vmid));
+}
+
+async function createSnapshot(req: Request, ctx: ResolvedDeps, uuid: string): Promise<Response> {
+  const { vm, client } = vmAndClient(ctx, uuid);
+  const body = (await readJson(req)) as { name?: unknown; description?: unknown; with_memory?: unknown };
+  const name = firstString(body.name);
+  if (!name || !SNAPSHOT_NAME.test(name)) {
+    throw invalidRequest("'name' must start with a letter and use 2-40 of [A-Za-z0-9_-]");
+  }
+  await assertDiskSpace(ctx);
+  await client.createSnapshot(vm.vmid, name, {
+    description: typeof body.description === "string" ? body.description : undefined,
+    withMemory: body.with_memory === true,
+  });
+  return json({ created: name, snapshots: await client.listSnapshots(vm.vmid) }, 201);
+}
+
+async function rollbackSnapshot(_req: Request, ctx: ResolvedDeps, uuid: string, name: string): Promise<Response> {
+  const { vm, client } = vmAndClient(ctx, uuid);
+  await client.rollbackSnapshot(vm.vmid, name);
+  return json({ rolledBack: name });
+}
+
+async function deleteSnapshot(_req: Request, ctx: ResolvedDeps, uuid: string, name: string): Promise<Response> {
+  const { vm, client } = vmAndClient(ctx, uuid);
+  await client.deleteSnapshot(vm.vmid, name);
+  return json({ deleted: name });
+}
+
+async function getNetwork(_req: Request, ctx: ResolvedDeps, uuid: string): Promise<Response> {
+  const { vm, client } = vmAndClient(ctx, uuid);
+  return json(await client.getNetworkPolicy(vm.vmid));
+}
+
+async function setNetwork(req: Request, ctx: ResolvedDeps, uuid: string): Promise<Response> {
+  const { vm, client } = vmAndClient(ctx, uuid);
+  const body = (await readJson(req)) as { mode?: unknown };
+  if (body.mode !== "internet" && body.mode !== "isolated") {
+    throw invalidRequest("'mode' must be \"internet\" or \"isolated\"");
+  }
+  return json(await client.setNetworkPolicy(vm.vmid, body.mode as NetworkMode));
+}
+
 // ---------------------------------------------------------------------------
 // Routing
 // ---------------------------------------------------------------------------
@@ -873,6 +978,12 @@ const ROUTES: Route[] = [
   { method: "GET", segments: ["v1", "artifacts", ":id"], handler: getArtifact },
   { method: "POST", segments: ["v1", "vms", ":id", "tool-calls", "increment"], handler: incrementToolCalls },
   { method: "POST", segments: ["v1", "vms", ":id", "tool-calls", "decrement"], handler: decrementToolCalls },
+  { method: "GET", segments: ["v1", "vms", ":id", "snapshots"], handler: listSnapshots },
+  { method: "POST", segments: ["v1", "vms", ":id", "snapshots"], handler: createSnapshot },
+  { method: "POST", segments: ["v1", "vms", ":id", "snapshots", ":name", "rollback"], handler: rollbackSnapshot },
+  { method: "DELETE", segments: ["v1", "vms", ":id", "snapshots", ":name"], handler: deleteSnapshot },
+  { method: "GET", segments: ["v1", "vms", ":id", "network"], handler: getNetwork },
+  { method: "PUT", segments: ["v1", "vms", ":id", "network"], handler: setNetwork },
 ];
 
 export function createLiteHandler(deps: RouterDeps): (req: Request) => Promise<Response> {

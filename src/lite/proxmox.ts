@@ -9,7 +9,7 @@
  * `vmhub-<prefix>-<uuid>` tag carried on the VM. Numeric VMIDs are internal
  * and never treated as stable vmhub identities.
  */
-import type { Template, VmError } from "../shared/types.ts";
+import type { NetworkMode, NetworkPolicy, Template, VmError, VmSnapshot } from "../shared/types.ts";
 import { DEFAULT_HINT } from "../shared/types.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 
@@ -74,6 +74,15 @@ export interface ProxmoxClient {
    * available=false with a reason listing what is missing.
    */
   probeCapabilities(vmid: number): Promise<{ available: boolean; reason?: string }>;
+  /** Snapshots of a VM (the implicit "current" entry excluded), oldest first. */
+  listSnapshots(vmid: number): Promise<VmSnapshot[]>;
+  createSnapshot(vmid: number, name: string, opts?: { description?: string; withMemory?: boolean }): Promise<void>;
+  /** Roll back and leave the VM running. */
+  rollbackSnapshot(vmid: number, name: string): Promise<void>;
+  deleteSnapshot(vmid: number, name: string): Promise<void>;
+  getNetworkPolicy(vmid: number): Promise<NetworkPolicy>;
+  /** Apply a lease network policy via the per-VM firewall. `gateway` (host's guest-bridge IP) defaults to the node's pool gateway. */
+  setNetworkPolicy(vmid: number, mode: NetworkMode, gateway?: string): Promise<NetworkPolicy>;
   /** Release any held resources. Safe to call once; mock is a no-op. */
   close?(): Promise<void>;
 }
@@ -274,6 +283,58 @@ export class MockProxmox implements ProxmoxClient {
 
   async destroyVm(vmid: number): Promise<void> {
     this.vms.delete(this.key(this.nodeId, vmid));
+    this.snaps.delete(vmid);
+    this.policies.delete(vmid);
+  }
+
+  private snaps = new Map<number, VmSnapshot[]>();
+  private policies = new Map<number, NetworkPolicy>();
+
+  /** Existence check that does not go through getVm (tests count getVm calls). */
+  private must(vmid: number): ProxmoxVm {
+    const vm = this.vms.get(this.key(this.nodeId, vmid));
+    if (!vm) throw notFound(`proxmox vm ${vmid} not found`);
+    return vm;
+  }
+
+  async listSnapshots(vmid: number): Promise<VmSnapshot[]> {
+    this.must(vmid);
+    return [...(this.snaps.get(vmid) ?? [])];
+  }
+
+  async createSnapshot(vmid: number, name: string, opts: { description?: string; withMemory?: boolean } = {}): Promise<void> {
+    this.must(vmid);
+    const list = this.snaps.get(vmid) ?? [];
+    if (list.some((s) => s.name === name)) {
+      throw { code: "ALREADY_EXISTS", message: `snapshot '${name}' exists`, retryable: false, hint: DEFAULT_HINT.ALREADY_EXISTS } as VmError;
+    }
+    list.push({ name, description: opts.description, createdAt: Date.now(), withMemory: opts.withMemory ?? false, parent: list.at(-1)?.name });
+    this.snaps.set(vmid, list);
+  }
+
+  async rollbackSnapshot(vmid: number, name: string): Promise<void> {
+    const vm = this.must(vmid);
+    if (!(this.snaps.get(vmid) ?? []).some((s) => s.name === name)) throw notFound(`snapshot '${name}' not found`);
+    vm.status = "running";
+  }
+
+  async deleteSnapshot(vmid: number, name: string): Promise<void> {
+    this.must(vmid);
+    const list = this.snaps.get(vmid) ?? [];
+    if (!list.some((s) => s.name === name)) throw notFound(`snapshot '${name}' not found`);
+    this.snaps.set(vmid, list.filter((s) => s.name !== name));
+  }
+
+  async getNetworkPolicy(vmid: number): Promise<NetworkPolicy> {
+    this.must(vmid);
+    return this.policies.get(vmid) ?? { mode: "unmanaged", enforced: false, reason: "no policy applied" };
+  }
+
+  async setNetworkPolicy(vmid: number, mode: NetworkMode, _gateway?: string): Promise<NetworkPolicy> {
+    this.must(vmid);
+    const policy: NetworkPolicy = { mode, enforced: true };
+    this.policies.set(vmid, policy);
+    return policy;
   }
 
   /**

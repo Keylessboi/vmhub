@@ -1,7 +1,7 @@
 /**
  * vmhub-mcp — the unified MCP server.
  *
- * One stdio server exposing the 22 vm_* tools (zod 4 schemas) across every
+ * One stdio server exposing the 27 vm_* tools (zod 4 schemas) across every
  * OS family through its DesktopAdapter. All lease/provisioning state lives in
  * vmhub-lite (thin REST client); adapters are the only components that know
  * their transport. Capability gating is runtime-only: tools are never absent,
