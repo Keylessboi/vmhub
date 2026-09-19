@@ -4,7 +4,7 @@
  * registry-driven per-node static-NAT allocator.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { osFromTemplateName, NodeIpPool, poolForNode, RealProxmox, ipFromConfig, guestDns } from './proxmox-real.ts';
+import { osFromTemplateName, NodeIpPool, poolForNode, RealProxmox, ipFromConfig, guestDns, encodePs, windowsIpScript } from './proxmox-real.ts';
 import { isVmError } from '../mcp/errors.ts';
 
 describe('osFromTemplateName', () => {
@@ -146,5 +146,18 @@ describe("guestDns", () => {
   it("defaults to public resolvers, never the host's tailnet DNS", () => {
     expect(guestDns({})).toBe("1.1.1.1 9.9.9.9");
     expect(guestDns({ VMHUB_GUEST_DNS: "10.10.10.1, 8.8.8.8" })).toBe("10.10.10.1 8.8.8.8");
+  });
+});
+
+describe("windowsIpScript", () => {
+  it("sets the lease address, gateway and DNS on the first up adapter, idempotently", () => {
+    const sc = windowsIpScript("10.10.10.52", "10.10.10.1", "1.1.1.1 9.9.9.9");
+    expect(sc).toContain("-IPAddress '10.10.10.52'");
+    expect(sc).toContain("-DefaultGateway '10.10.10.1'");
+    expect(sc).toContain("-ServerAddresses @('1.1.1.1','9.9.9.9')");
+    expect(sc).toMatch(/if \(-not \(Get-NetIPAddress/);
+  });
+  it("encodes PowerShell as UTF-16LE base64", () => {
+    expect(Buffer.from(encodePs("ls"), "base64").toString("utf16le")).toBe("ls");
   });
 });

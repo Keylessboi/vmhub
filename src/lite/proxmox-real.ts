@@ -17,6 +17,7 @@ import { describeError } from "../shared/types.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 import type { CreateProxmoxVmInput, ProxmoxClient, ProxmoxVm, ProxmoxVmStatus } from "./proxmox.ts";
 import { isVmError } from "../mcp/errors.ts";
+import { connect as netConnect } from "node:net";
 
 export interface RealProxmoxOptions {
   host: string;
@@ -291,28 +292,65 @@ export class RealProxmox implements ProxmoxClient {
   }
 
   /**
-   * Boot readiness, judged from the host side: the VM is running and — when
-   * the template enables the QEMU guest agent — the agent answers ping, which
-   * means the guest OS is up. Guest-level access (SSH, CursorTouch, adb) is
-   * the MCP adapters' job; lite never needs a route or a key into the guest.
-   * A guest that is slow to answer is still handed out (the adapters retry)
-   * rather than destroyed.
+   * Boot readiness, judged from the host side (lite runs on the Proxmox host,
+   * which routes the guest network):
+   *  1. the VM is running;
+   *  2. when the template enables the QEMU guest agent, it answers ping;
+   *  3. Windows goldens carry a baked-in static IP, so the lease's address
+   *     (ipconfig0) is applied through the guest agent;
+   *  4. the guest's control port answers — sshd (22) on Linux, CursorTouch
+   *     (8000) on Windows — so "ready" means an agent's first call works.
+   * A guest that misses a step is still handed out with a reason (the
+   * adapters retry) rather than destroyed.
    */
   async probeCapabilities(vmid: number): Promise<{ available: boolean; reason?: string }> {
     const node = await this.node();
-    const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { agent?: string };
+    const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { agent?: string; ostype?: string; ipconfig0?: string };
     if ((await this.status(vmid)) !== "running") return { available: false, reason: `VM ${vmid} is not running` };
-    if (!config.agent || !/^(1|enabled=1)/.test(String(config.agent))) return { available: true };
-    const deadline = Date.now() + Number(process.env.VMHUB_BOOT_WAIT_MS ?? 90_000);
-    while (Date.now() < deadline) {
-      try {
-        await this.request("POST", `/nodes/${node}/qemu/${vmid}/agent/ping`, {});
-        return { available: true };
-      } catch {
-        await new Promise((r) => setTimeout(r, 3000));
+    const windows = /^win/.test(config.ostype ?? "");
+    const budget = Number(windows ? process.env.VMHUB_BOOT_WAIT_WINDOWS_MS ?? 45 * 60_000 : process.env.VMHUB_BOOT_WAIT_MS ?? 180_000);
+    const deadline = Date.now() + budget;
+    const ip = ipFromConfig(config.ipconfig0);
+
+    if (config.agent && /^(1|enabled=1)/.test(String(config.agent))) {
+      let up = false;
+      while (!up && Date.now() < deadline) {
+        try {
+          await this.request("POST", `/nodes/${node}/qemu/${vmid}/agent/ping`, {});
+          up = true;
+        } catch {
+          await new Promise((r) => setTimeout(r, 5000));
+        }
+      }
+      if (!up) return { available: true, reason: "guest agent did not answer; the guest may still be booting" };
+      if (windows && ip) {
+        const gw = this.pool.config.gateway;
+        const res = await this.agentExec(vmid, ["powershell", "-NoProfile", "-EncodedCommand", encodePs(windowsIpScript(ip, gw, guestDns()))], 120_000);
+        if (res.exitcode !== 0) return { available: true, reason: `could not set the lease IP in Windows: ${res.err.slice(-300)}` };
       }
     }
-    return { available: true, reason: "guest agent did not answer yet; the guest may still be booting" };
+    if (!ip || process.env.VMHUB_READY_PORT_CHECK === "0") return { available: true };
+    const port = windows ? Number(process.env.CURSORTOUCH_PORT ?? 8000) : 22;
+    while (Date.now() < deadline) {
+      if (await tcpOpen(ip, port)) return { available: true };
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    return { available: true, reason: `${ip}:${port} did not answer within ${Math.round(budget / 1000)}s` };
+  }
+
+  /** Run a command through the QEMU guest agent and wait for it (exit code + output). */
+  private async agentExec(vmid: number, command: string[], timeoutMs: number): Promise<{ exitcode: number; out: string; err: string }> {
+    const node = await this.node();
+    const { pid } = (await this.request("POST", `/nodes/${node}/qemu/${vmid}/agent/exec`, { command })) as { pid: number };
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const st = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/agent/exec-status?pid=${pid}`)) as {
+        exited?: number; exitcode?: number; "out-data"?: string; "err-data"?: string;
+      };
+      if (st.exited) return { exitcode: Number(st.exitcode ?? 1), out: st["out-data"] ?? "", err: st["err-data"] ?? "" };
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    return { exitcode: 124, out: "", err: `guest command still running after ${timeoutMs}ms` };
   }
 
   async getVm(vmid: number): Promise<ProxmoxVm> {
@@ -617,4 +655,39 @@ export function ipFromConfig(ipconfig?: string): string | undefined {
 /** Resolvers written into every lease VM's cloud-init (VMHUB_GUEST_DNS, space-separated). */
 export function guestDns(env: NodeJS.ProcessEnv = process.env): string {
   return (env.VMHUB_GUEST_DNS ?? "1.1.1.1 9.9.9.9").trim().split(/[\s,]+/).join(" ");
+}
+
+/** Can we open a TCP connection to host:port within 3s? */
+function tcpOpen(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = netConnect({ host, port });
+    const done = (ok: boolean) => { sock.destroy(); resolve(ok); };
+    sock.setTimeout(3000, () => done(false));
+    sock.once("connect", () => done(true));
+    sock.once("error", () => done(false));
+  });
+}
+
+/** PowerShell -EncodedCommand payload (UTF-16LE base64). */
+export function encodePs(script: string): string {
+  return Buffer.from(script, "utf16le").toString("base64");
+}
+
+/**
+ * Give a Windows guest the lease's static address. Windows goldens carry a
+ * baked-in address (cloud-init's ipconfig0 does not reach Windows without
+ * cloudbase-init), so every clone would otherwise come up on the same IP.
+ */
+export function windowsIpScript(ip: string, gateway: string, dns: string): string {
+  const servers = dns.split(/\s+/).filter(Boolean).map((d) => `'${d}'`).join(",");
+  return [
+    "$ErrorActionPreference='Stop'",
+    "$a = Get-NetAdapter | Where-Object Status -eq 'Up' | Sort-Object ifIndex | Select-Object -First 1",
+    `if (-not (Get-NetIPAddress -InterfaceIndex $a.ifIndex -IPAddress '${ip}' -ErrorAction SilentlyContinue)) {`,
+    "  Get-NetIPAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false",
+    "  Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false",
+    `  New-NetIPAddress -InterfaceIndex $a.ifIndex -IPAddress '${ip}' -PrefixLength 24 -DefaultGateway '${gateway}' | Out-Null`,
+    "}",
+    `Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses @(${servers})`,
+  ].join("\n");
 }
