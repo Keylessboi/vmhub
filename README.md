@@ -4,7 +4,7 @@ A unified MCP server for driving VMs. An AI agent uses it to create a VM, see it
 
 ## What it is
 
-One server. Many OS adapters. The server presents 22 `vm_*` tools. Each tool works the same way no matter what runs inside the VM: Hyprland, X11, Windows, macOS, or Android.
+One server. Many OS adapters. The server presents 27 `vm_*` tools. Each tool works the same way no matter what runs inside the VM: Hyprland, X11, Windows, macOS, or Android.
 
 The server hides the machinery. The agent never touches Proxmox, never writes SSH config, never learns the difference between a Wayland compositor and a Windows desktop. It asks for a VM, waits for it to be ready, looks at the screen, acts, and releases the lease.
 
@@ -18,7 +18,7 @@ The server hides the machinery. The agent never touches Proxmox, never writes SS
 | **Lease** | A time-limited claim on a VM. Created by the agent, destroyed by the reaper when it expires or the agent releases it. |
 | **Reaper** | The independent process that destroys expired leases and their VMs. It reads the database directly and works even when the control plane is down. |
 | **Control plane (lite)** | The REST server that manages leases, templates, and VM state. Binds localhost in v1. |
-| **MCP server** | The stdio server that agents talk to. It exposes the 22 `vm_*` tools and delegates to adapters and the control plane. |
+| **MCP server** | The stdio server that agents talk to. It exposes the 27 `vm_*` tools and delegates to adapters and the control plane. |
 | **Proxmox API token** | A scoped credential for the Proxmox REST API. vmhub uses tokens, never root passwords. |
 | **CursorTouch** | An in-VM MCP server for Windows. The Windows adapter talks to it over HTTP to control the Windows desktop. |
 | **Identity tag** | A Proxmox tag in the format `vmhub-<prefix>-<uuid>`. Used for identity-verified teardown. |
@@ -126,8 +126,46 @@ Ask your agent to call `vm_list_templates`. If templates appear with capabilitie
 | `vm_click` / `vm_type` / `vm_key` / `vm_paste` / `vm_drag` | Drive input. |
 | `vm_launch` / `vm_focus` / `vm_close` | Manage apps and windows. |
 | `vm_dispatch` | Validated escape hatch per adapter. |
-| `vm_put_file` / `vm_get_file` | Move files in and out. |
+| `vm_put_file` / `vm_get_file` | Move files in and out (scp on Linux, adb on Android, chunked PowerShell on Windows). |
 | `vm_clone_repo` | Clone a repository into the VM. |
+| `vm_exec` | Run a shell command: bash on Linux, PowerShell on Windows, adb shell on Android. Exit code, stdout, stderr, timeout, detach. |
+| `vm_snapshot` | Create / revert / list / delete Proxmox snapshots (optionally with RAM state). |
+| `vm_network` | Read or set the lease network policy: `internet` (no LAN/tailnet/other VMs) or `isolated` (no outbound at all). |
+| `vm_capture` | Host-side packet capture on the VM's tap interface; stop returns DNS, TLS names, HTTP requests and every outbound flow. |
+
+## Using it as a lab
+
+The VMs are disposable, so an agent can test software and watch what untrusted programs do without touching your machine:
+
+```
+vm_lease_create { template_id: "2070", network: "isolated", ... }   # a sample never gets a moment of LAN access
+vm_snapshot     { action: "create", name: "clean" }
+vm_capture      { action: "start" }
+vm_put_file     { local_path: "/samples/x.bin", remote_path: "/root/x.bin" }
+vm_exec         { command: "chmod +x /root/x.bin && /root/x.bin", detach: true }
+vm_exec         { command: "ps auxf; ss -tupan; find / -xdev -newer /root/x.bin -type f 2>/dev/null | head -200" }
+vm_capture      { action: "stop" }       # → dnsQueries, tlsServerNames, httpRequests, flows (answered / blocked)
+vm_snapshot     { action: "revert", name: "clean" }
+```
+
+Network policy is enforced by the Proxmox per-VM firewall, outside the guest. `internet` drops 10/8, 172.16/12, 192.168/16, 100.64/10 and 169.254/16 (DNS to the host gateway is allowed); `isolated` drops all outbound traffic. The host's inbound control path (SSH, CursorTouch, adb) works in both. `enforced: false` in a response means the datacenter firewall is off and nothing is being blocked. New leases get `VMHUB_DEFAULT_NETWORK` (`internet` unless set to `unmanaged`); an explicit `network` on `vm_lease_create` is a hard requirement — the lease fails rather than boot unenforced.
+
+Capture needs `tcpdump` on the Proxmox host. Captures are written to `~/.local/share/vmhub/captures/` (`VMHUB_CAPTURE_DIR`).
+
+## Reaching the host
+
+Every VM connection hops through the Proxmox host over SSH; nothing needs a route to the guest network (10.10.10.0/24). Windows (CursorTouch :8000) and Android (adb :5555) go through `ssh -L` tunnels the adapters manage.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `VMHUB_JUMP_HOST` | `192.168.1.220` | Host, `user@host` or an `~/.ssh/config` alias — e.g. the host's Tailscale name. |
+| `VMHUB_JUMP_USER` | `VMHUB_SSH_USER`, then `root` | User on the Proxmox host (tcpdump needs root). |
+| `VMHUB_SSH_USER` | `root` | User inside Linux guests. |
+| `VMHUB_SSH_KEY` | ssh default | Identity file used for both hops. |
+| `VMHUB_SSH_MULTIPLEX` | on | Set `0` to disable the ControlMaster on the jump hop. |
+| `VMHUB_DIRECT_GUEST_NET` | off | Set `1` when this machine routes the guest network itself (e.g. vmhub-mcp on the host); skips tunnels. |
+
+The jump hop uses `BatchMode=yes`: key auth only. A Tailscale SSH "check" policy on the host blocks it until re-authenticated in a browser — use an `accept` rule for the machine running vmhub-mcp.
 
 ## How the capability matrix works
 
@@ -179,7 +217,7 @@ vmhub supports two credential layouts for backward compatibility:
 
 ```sh
 bun install
-bun test          # 76 tests
+bun run test      # vitest
 bun run typecheck
 bun run build     # compiles dist/vmhub-mcp
 bun run build:lite

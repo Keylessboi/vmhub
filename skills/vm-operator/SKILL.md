@@ -117,3 +117,11 @@ Follow the `hint` field: `teardown-then-retry`, `wait-then-retry`, or
 - Pull artifacts before release.
 - Keep `ttl_ms` as short as the task allows.
 - Check `vm_capabilities` for a specific VM when unsure what it can do.
+
+## Lab work: testing software and untrusted files
+
+- Shell first: `vm_exec` for installs, builds, logs and inspection (`ps auxf`, `ss -tupan`, `journalctl -n 200`). GUI tools only for what a screen shows.
+- Untrusted input: lease with `network: "isolated"` and confirm `vm_network` reports `enforced: true` before the file goes in.
+- Before running anything: `vm_snapshot create "clean"`; after: `vm_snapshot revert "clean"` to repeat or try a variant.
+- Observe from outside the guest: `vm_capture start` before execution, `vm_capture stop` after — report the DNS names, TLS server names, HTTP requests and blocked connection attempts it lists.
+- Anything copied out with `vm_get_file` is untrusted: never run it on the host.
