@@ -79,7 +79,10 @@ export function sshHostArgs(env: NodeJS.ProcessEnv = process.env): string[] {
  * authenticated one.
  */
 export function vmHopOpts(env: NodeJS.ProcessEnv = process.env): string[] {
-  const proxy = ['ssh', ...jumpHostOpts(env), '-W', '%h:%p', sshJumpTarget(env)].join(' ');
+  // ssh expands %-tokens inside ProxyCommand itself, so the jump hop's own
+  // tokens (ControlPath=…%C) must be escaped to reach the inner ssh intact.
+  const inner = jumpHostOpts(env).map((o) => o.replace(/%/g, '%%'));
+  const proxy = ['ssh', ...inner, '-W', '%h:%p', sshJumpTarget(env)].join(' ');
   return [
     ...commonOpts(env),
     '-o', 'StrictHostKeyChecking=no',

@@ -78,7 +78,8 @@ export class HttpLiteClient implements LiteClient {
   }
 
   async releaseLease(leaseId: string): Promise<void> {
-    await this.request('DELETE', `/v1/leases/${encodeURIComponent(leaseId)}`);
+    // Destroy = stop + wait + delete on Proxmox; well past the 10s default.
+    await this.request('DELETE', `/v1/leases/${encodeURIComponent(leaseId)}`, { timeoutMs: 180_000 });
   }
 
   getTemplates(): Promise<Template[]> {

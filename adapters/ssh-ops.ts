@@ -99,7 +99,7 @@ export async function sshExec(vm: Vm, cmd: string, args: string[] = [], opts: Ex
     outputCap: opts.outputCap ?? DEFAULT_OUTPUT_CAP,
   });
   // ssh itself exits 255 on connection failure; surface it as transport, not a command result.
-  if (res.exitCode === 255 && /ssh:|Connection|Permission denied|ProxyCommand|kex_exchange|Could not resolve|Host key/i.test(res.stderr)) {
+  if (res.exitCode === 255 && /ssh:|ssh_|Connection|Permission denied|ProxyCommand|kex_exchange|Could not resolve|Host key|percent_expand|forwarding request failed|Session open refused|UNKNOWN port/i.test(res.stderr)) {
     throw vmError('INTERNAL', `exec: cannot reach VM ${vm.uuid} (${vm.ip}) over SSH: ${res.stderr.trim().slice(-500)}`,
       'The VM may still be booting (retry after vm_lease_status says ready), or the jump host is unreachable (check VMHUB_JUMP_HOST).');
   }

@@ -61,6 +61,12 @@ describe('sshIntoVmArgs', () => {
     expect(args.find((a) => a.startsWith('ProxyCommand='))).toMatch(/^ProxyCommand=ssh -F \/c\/ssh_config .* root@vmhub$/);
   });
 
+  it('escapes the jump hop %-tokens inside the ProxyCommand', () => {
+    const proxy = sshIntoVmArgs(vm, { VMHUB_SSH_CONTROL_DIR: '/c' }).find((a) => a.startsWith('ProxyCommand='))!;
+    expect(proxy).toContain('ControlPath=/c/vmhub-%%C');
+    expect(proxy).toContain('-W %h:%p');
+  });
+
   it('multiplexes the jump hop unless disabled', () => {
     expect(sshHostArgs({}).join(' ')).toContain('ControlMaster=auto');
     expect(sshHostArgs({ VMHUB_SSH_MULTIPLEX: '0' }).join(' ')).not.toContain('ControlMaster');

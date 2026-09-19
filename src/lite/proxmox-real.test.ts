@@ -4,7 +4,7 @@
  * registry-driven per-node static-NAT allocator.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { osFromTemplateName, NodeIpPool, poolForNode, RealProxmox } from './proxmox-real.ts';
+import { osFromTemplateName, NodeIpPool, poolForNode, RealProxmox, ipFromConfig, guestDns } from './proxmox-real.ts';
 import { isVmError } from '../mcp/errors.ts';
 
 describe('osFromTemplateName', () => {
@@ -130,5 +130,21 @@ describe('listVms resilience', () => {
     const vms = await client.listVms();
 
     expect(vms.map((v) => v.vmid).sort()).toEqual([1001, 3000]);
+  });
+});
+
+describe("ipFromConfig", () => {
+  it("reads the static cloud-init address", () => {
+    expect(ipFromConfig("ip=10.10.10.62/24,gw=10.10.10.1")).toBe("10.10.10.62");
+    expect(ipFromConfig("gw=10.10.10.1,ip=10.10.10.7/24")).toBe("10.10.10.7");
+    expect(ipFromConfig("ip=dhcp")).toBeUndefined();
+    expect(ipFromConfig(undefined)).toBeUndefined();
+  });
+});
+
+describe("guestDns", () => {
+  it("defaults to public resolvers, never the host's tailnet DNS", () => {
+    expect(guestDns({})).toBe("1.1.1.1 9.9.9.9");
+    expect(guestDns({ VMHUB_GUEST_DNS: "10.10.10.1, 8.8.8.8" })).toBe("10.10.10.1 8.8.8.8");
   });
 });

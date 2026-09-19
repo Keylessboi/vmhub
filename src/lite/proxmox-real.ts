@@ -17,7 +17,6 @@ import { describeError } from "../shared/types.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 import type { CreateProxmoxVmInput, ProxmoxClient, ProxmoxVm, ProxmoxVmStatus } from "./proxmox.ts";
 import { isVmError } from "../mcp/errors.ts";
-import { execFileSync } from "node:child_process";
 
 export interface RealProxmoxOptions {
   host: string;
@@ -266,6 +265,11 @@ export class RealProxmox implements ProxmoxClient {
     await this.request("POST", `/nodes/${node}/qemu/${vmid}/config`, {
       tags: input.proxmoxTag,
       ipconfig0: `ip=${vmIp}/${this.pool.config.subnet.split("/")[1] ?? "24"},gw=${this.pool.config.gateway}`,
+      // Without an explicit nameserver, Proxmox hands the guest the HOST's
+      // resolv.conf — here Tailscale MagicDNS (100.100.100.100) and the
+      // tailnet search domain. Lease VMs get public resolvers instead.
+      nameserver: guestDns(),
+      searchdomain: "vmhub.invalid",
     });
     const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string };
     const tags = this.parseTags(config);
@@ -281,62 +285,36 @@ export class RealProxmox implements ProxmoxClient {
     return this.getVm(vmid);
   }
 
+  /**
+   * Boot readiness, judged from the host side: the VM is running and — when
+   * the template enables the QEMU guest agent — the agent answers ping, which
+   * means the guest OS is up. Guest-level access (SSH, CursorTouch, adb) is
+   * the MCP adapters' job; lite never needs a route or a key into the guest.
+   * A guest that is slow to answer is still handed out (the adapters retry)
+   * rather than destroyed.
+   */
   async probeCapabilities(vmid: number): Promise<{ available: boolean; reason?: string }> {
-    const vm = await this.getVm(vmid);
-    if (!vm.ip) {
-      return { available: false, reason: "VM has no IP address assigned" };
+    const node = await this.node();
+    const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { agent?: string };
+    if ((await this.status(vmid)) !== "running") return { available: false, reason: `VM ${vmid} is not running` };
+    if (!config.agent || !/^(1|enabled=1)/.test(String(config.agent))) return { available: true };
+    const deadline = Date.now() + Number(process.env.VMHUB_BOOT_WAIT_MS ?? 90_000);
+    while (Date.now() < deadline) {
+      try {
+        await this.request("POST", `/nodes/${node}/qemu/${vmid}/agent/ping`, {});
+        return { available: true };
+      } catch {
+        await new Promise((r) => setTimeout(r, 3000));
+      }
     }
-
-    const sshKey = process.env.VMHUB_SSH_KEY || `${process.env.HOME}/.ssh/vmhub_rsa`;
-    const sshUser = process.env.VMHUB_SSH_USER || "vmhub";
-
-    const requiredBinaries: Record<string, string[]> = {
-      hyprland: ["hyprctl", "grim", "slurp", "wtype", "wl-copy", "wl-paste", "ffmpeg"],
-      x11: ["xdotool", "scrot", "ffmpeg"],
-      windows: [],
-      headless: ["ffmpeg"],
-    };
-
-    const os = osFromTemplateName(vm.name);
-    const bins = requiredBinaries[os] ?? [];
-    if (bins.length === 0) return { available: true };
-
-    const checkCmd = bins.map((b) => `which ${b} >/dev/null 2>&1`).join(" && ");
-    try {
-      execFileSync("ssh", [
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "ConnectTimeout=5",
-        "-o", "BatchMode=yes",
-        "-i", sshKey,
-        `${sshUser}@${vm.ip}`,
-        checkCmd,
-      ], { timeout: 10_000, encoding: "utf8" });
-      return { available: true };
-    } catch (err) {
-      const missing = bins.filter((b) => {
-        try {
-          execFileSync("ssh", [
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "ConnectTimeout=5",
-            "-o", "BatchMode=yes",
-            "-i", sshKey,
-            `${sshUser}@${vm.ip}`,
-            `which ${b} >/dev/null 2>&1`,
-          ], { timeout: 10_000, encoding: "utf8" });
-          return false;
-        } catch {
-          return true;
-        }
-      });
-      return { available: false, reason: `missing: ${missing.join(", ")}` };
-    }
+    return { available: true, reason: "guest agent did not answer yet; the guest may still be booting" };
   }
 
   async getVm(vmid: number): Promise<ProxmoxVm> {
     const node = await this.node();
     const vm = await this.statusVm(vmid);
-    const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string };
-    return this.toVm({ ...vm, vmid }, this.parseTags(config), node);
+    const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string; ipconfig0?: string };
+    return this.toVm({ ...vm, vmid }, this.parseTags(config), node, ipFromConfig(config.ipconfig0));
   }
 
   async listVms(): Promise<ProxmoxVm[]> {
@@ -602,4 +580,15 @@ export function createRealProxmox(config: RealProxmoxNodeConfig): RealProxmox {
 /** "10.10.10.0/24", 50 → "10.10.10.50" — octet-based config to legacy IP string. */
 function hostIp(subnet: string, octet: number): string {
   return `${subnet.split("/")[0]!.split(".").slice(0, 3).join(".")}.${octet}`;
+}
+
+/** "ip=10.10.10.62/24,gw=10.10.10.1" → "10.10.10.62" (static cloud-init address). */
+export function ipFromConfig(ipconfig?: string): string | undefined {
+  const m = /(?:^|,)ip=(\d+\.\d+\.\d+\.\d+)/.exec(ipconfig ?? "");
+  return m?.[1];
+}
+
+/** Resolvers written into every lease VM's cloud-init (VMHUB_GUEST_DNS, space-separated). */
+export function guestDns(env: NodeJS.ProcessEnv = process.env): string {
+  return (env.VMHUB_GUEST_DNS ?? "1.1.1.1 9.9.9.9").trim().split(/[\s,]+/).join(" ");
 }
