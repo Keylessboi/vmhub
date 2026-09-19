@@ -192,42 +192,13 @@ export class WindowsAdapter implements DesktopAdapter {
   async listWindows(vm: Vm, filter?: string): Promise<WindowInfo[]> {
     const conn = await this.ensureConnection(vm);
     const res = await conn.client.callTool({ name: 'Snapshot', arguments: {} });
-    const text = textContent(res.content);
-    const windows: WindowInfo[] = [];
-    if (text) {
-      const lines = text.split('\n').filter((l) => {
-        const lower = l.toLowerCase();
-        return l.trim() && !lower.includes('window') && !lower.includes('root');
-      });
-      const q = filter?.toLowerCase();
-      for (const line of lines) {
-        if (q && !line.toLowerCase().includes(q)) continue;
-        let x = 0, y = 0, width = 0, height = 0;
-        const rectMatch = line.match(/\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]/);
-        if (rectMatch) {
-          x = parseInt(rectMatch[1]!, 10);
-          y = parseInt(rectMatch[2]!, 10);
-          width = parseInt(rectMatch[3]!, 10);
-          height = parseInt(rectMatch[4]!, 10);
-        } else {
-          const pathMatch = line.match(/Rect\((\d+),\s*(\d+),\s*(\d+),\s*(\d+)\)/i);
-          if (pathMatch) {
-            x = parseInt(pathMatch[1]!, 10);
-            y = parseInt(pathMatch[2]!, 10);
-            width = parseInt(pathMatch[3]!, 10);
-            height = parseInt(pathMatch[4]!, 10);
-          }
-        }
-        windows.push({ id: line.trim(), title: line.trim(), className: '', x, y, width, height, focused: false, visible: true });
-      }
-    }
-    return windows;
+    return parseSnapshotWindows(textContent(res.content as unknown[]) ?? '', filter);
   }
 
   async inspect(vm: Vm): Promise<SemanticElement> {
     const conn = await this.ensureConnection(vm);
     const res = await conn.client.callTool({ name: 'Snapshot', arguments: {} });
-    const text = textContent(res.content);
+    const text = decodeSnapshotText(textContent(res.content as unknown[]) ?? '');
     return {
       role: 'window',
       name: 'Windows desktop (UIA)',
@@ -312,12 +283,51 @@ export class WindowsAdapter implements DesktopAdapter {
     writeFileSync(localPath, Buffer.concat(parts));
   }
 
+  /**
+   * Map a vm_* window verb onto CursorTouch's own tools. Its App tool takes
+   * {mode, name|executable}, not vmhub's argument names, and has no close
+   * mode at all — closing a program is Process(kill). Passing vmhub's
+   * arguments straight through "succeeded" while doing nothing.
+   */
   async dispatch(vm: Vm, verb: string, args: Record<string, unknown>): Promise<unknown> {
     const conn = await this.ensureConnection(vm);
-    const tool = verb === 'launch' ? 'App' : verb === 'focus' ? 'App' : verb === 'close' ? 'App' : verb;
-    const res = await conn.client.callTool({ name: tool, arguments: args });
-    return res.content;
+    const call = async (name: string, argv: Record<string, unknown>): Promise<unknown> => {
+      const res = await conn.client.callTool({ name, arguments: argv }, { timeout: 120_000 });
+      return textContent(res.content as unknown[]) ?? res.content;
+    };
+    switch (verb) {
+      case 'launch': {
+        const command = String(args.command ?? args.name ?? '');
+        const extra = Array.isArray(args.args) ? (args.args as string[]) : [];
+        // A path (or an .exe with one) launches directly; a bare name goes
+        // through the Start menu, which is what App(launch) searches.
+        const out = /[\\/]/.test(command)
+          ? await call('App', { mode: 'launch_executable', executable: command, ...(extra.length ? { args: extra } : {}), ...(args.cwd ? { cwd: args.cwd } : {}) })
+          : await call('App', { mode: 'launch', name: command });
+        if (args.wait_for_window === false) return out;
+        const deadline = Date.now() + Number(args.timeout_ms ?? 15_000);
+        const wanted = command.split(/[\\/]/).pop()!.replace(/\.exe$/i, '').toLowerCase();
+        while (Date.now() < deadline) {
+          const windows = await this.listWindows(vm);
+          const hit = windows.find((w) => `${w.title} ${w.className}`.toLowerCase().includes(wanted));
+          if (hit) return { launched: command, window: hit };
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        return { launched: command, note: `no window matching "${wanted}" appeared; it may be a console program` };
+      }
+      case 'focus':
+        return call('App', { mode: 'switch', name: String(args.window ?? args.name ?? '') });
+      case 'close': {
+        const target = String(args.window ?? args.name ?? '');
+        return /^\d+$/.test(target)
+          ? call('Process', { mode: 'kill', pid: Number(target) })
+          : call('Process', { mode: 'kill', name: target.split(/[\\/]/).pop()!.replace(/\.exe$/i, '') });
+      }
+      default:
+        return call(verb, args);
+    }
   }
+
 
   releaseConnection(vm: Vm): void {
     const conn = this.conns.get(vm.uuid);
@@ -356,3 +366,68 @@ export function textContent(content: unknown[]): string | undefined {
 }
 
 export const windowsAdapter = new WindowsAdapter();
+
+/**
+ * CursorTouch returns Snapshot/Screenshot text as a JSON-encoded string (or
+ * array of them), so the report arrives with escaped newlines. Decode it
+ * before parsing; plain text passes through untouched.
+ */
+export function decodeSnapshotText(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('[') && !trimmed.startsWith('"')) return raw;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (typeof parsed === 'string') return parsed;
+    if (Array.isArray(parsed)) return parsed.filter((p): p is string => typeof p === 'string').join('\n');
+  } catch {
+    // not JSON after all — fall through
+  }
+  return raw;
+}
+
+/**
+ * Windows from a CursorTouch Snapshot. It prints a "Focused Window" table, an
+ * "Opened Windows" table (or "No windows found") and a UI tree whose top level
+ * is `window "Title"`. Rows: Name, Depth, Status, Width, Height, Handle.
+ */
+export function parseSnapshotWindows(raw: string, filter?: string): WindowInfo[] {
+  const text = decodeSnapshotText(raw);
+  const q = filter?.toLowerCase();
+  const out = new Map<string, WindowInfo>();
+  const add = (title: string, focused: boolean, size?: { w: number; h: number }, handle?: string): void => {
+    const name = title.trim();
+    if (!name || (q && !name.toLowerCase().includes(q))) return;
+    const existing = out.get(name);
+    if (existing) {
+      if (focused) existing.focused = true;
+      return;
+    }
+    out.set(name, {
+      id: handle ?? name,
+      title: name,
+      className: name.split(/[\\/]/).pop() ?? name,
+      x: 0,
+      y: 0,
+      width: size?.w ?? 0,
+      height: size?.h ?? 0,
+      focused,
+      visible: true,
+    });
+  };
+  const section = (heading: string): string[] => {
+    const at = text.indexOf(heading);
+    if (at < 0) return [];
+    const rest = text.slice(at + heading.length).split(/\n\s*\n/)[0] ?? '';
+    return rest.split('\n').map((l) => l.trim()).filter(Boolean);
+  };
+  // Table rows end with: Depth Status Width Height Handle
+  const row = /^(.*?)\s{2,}(\d+)\s+(\w+)\s+(\d+)\s+(\d+)\s+(\d+)$/;
+  for (const [heading, focused] of [['Focused Window:', true], ['Opened Windows:', false]] as const) {
+    for (const line of section(heading)) {
+      const m = row.exec(line);
+      if (m) add(m[1]!, focused, { w: Number(m[4]), h: Number(m[5]) }, m[6]);
+    }
+  }
+  for (const m of text.matchAll(/(?:^|├──|└──|│)\s*window\s+"([^"]*)"/g)) add(m[1]!, false);
+  return [...out.values()];
+}

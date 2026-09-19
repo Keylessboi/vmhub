@@ -5,7 +5,7 @@
  * Live-server behavior is exercised e2e against the golden, not here.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { CURSORTOUCH_PORT, WindowsAdapter, textContent, pngDimensions, SHELL_TOOL_PATTERN, psq, wrapPowerShell, parseShellReply } from '../windows/index.ts';
+import { CURSORTOUCH_PORT, WindowsAdapter, parseSnapshotWindows, decodeSnapshotText, textContent, pngDimensions, SHELL_TOOL_PATTERN, psq, wrapPowerShell, parseShellReply } from '../windows/index.ts';
 import type { Vm } from '../../src/shared/types.ts';
 
 const adapter = new WindowsAdapter();
@@ -183,5 +183,60 @@ describe('VM existence check', () => {
     await expect(
       adapter.screenshot({ ...vm, status: 'destroyed', ip: undefined }),
     ).rejects.toThrow(/does not exist on Proxmox/);
+  });
+});
+
+describe('parseSnapshotWindows', () => {
+  // Shape taken from a live CursorTouch Snapshot.
+  const snapshot = [
+    '    Cursor Position: (0, 0)',
+    'Visible Displays: 0:\\\\.\\DISPLAY1 (0,0,1280,800) primary',
+    '',
+    '    Focused Window:',
+    '    Name                           Depth  Status      Width    Height    Handle',
+    '---------------------------  -------  --------  -------  --------  --------',
+    'C:\\WINDOWS\\SYSTEM32\\cmd.exe        3  Normal       1129       635     65900',
+    '',
+    '    Opened Windows:',
+    '    Name                 Depth  Status   Width  Height  Handle',
+    '-------------------  -------  -------  -----  ------  ------',
+    'Untitled - Notepad         2  Normal     800     600   12345',
+    '',
+    '    UI Tree:',
+    '    desktop',
+    '    ├── window "C:\\WINDOWS\\SYSTEM32\\cmd.exe"',
+    '    ├── window ""',
+    '    ├── window "Internal Console Management Window"',
+  ].join('\n');
+
+  it('reads the focused and opened window tables', () => {
+    const w = parseSnapshotWindows(snapshot);
+    const cmd = w.find((x) => x.title.endsWith('cmd.exe'))!;
+    expect(cmd.focused).toBe(true);
+    expect([cmd.width, cmd.height]).toEqual([1129, 635]);
+    const notepad = w.find((x) => x.title === 'Untitled - Notepad')!;
+    expect(notepad).toMatchObject({ id: '12345', width: 800, height: 600, focused: false });
+  });
+
+  it('adds UI-tree windows, skips empty titles, and de-duplicates', () => {
+    const titles = parseSnapshotWindows(snapshot).map((w) => w.title);
+    expect(titles).toContain('Internal Console Management Window');
+    expect(titles.filter((t) => t.endsWith('cmd.exe'))).toHaveLength(1);
+    expect(titles).not.toContain('');
+  });
+
+  it('filters by substring', () => {
+    expect(parseSnapshotWindows(snapshot, 'notepad').map((w) => w.title)).toEqual(['Untitled - Notepad']);
+  });
+
+  it('decodes the JSON-encoded report CursorTouch actually returns', () => {
+    const wire = JSON.stringify([snapshot]);
+    expect(decodeSnapshotText(wire)).toBe(snapshot);
+    expect(parseSnapshotWindows(wire).map((w) => w.title)).toContain('Untitled - Notepad');
+    expect(decodeSnapshotText('plain text')).toBe('plain text');
+  });
+
+  it('survives a snapshot with no windows', () => {
+    expect(parseSnapshotWindows('Opened Windows:\n    No windows found\n')).toEqual([]);
   });
 });

@@ -60,7 +60,9 @@ const WINDOWS: Profile = {
   traffic: `Resolve-DnsName example.org -ErrorAction SilentlyContinue | Out-Null; try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 https://example.org | Out-Null } catch {}; try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://example.com/ | Out-Null } catch {}; ${PS_TCP('192.168.1.1', 445, 4000)} | Out-Null`,
   markDirty: "Set-Content -Path C:\\Users\\Public\\marker.txt -Value dirty",
   checkDirty: "if (Test-Path C:\\Users\\Public\\marker.txt) { 'STILL-DIRTY' } else { 'CLEAN' }",
-  launch: { command: 'notepad' },
+  // Win11 Enterprise Eval has no Notepad entry in the Start menu, so launch
+  // it by path (the adapter routes that to App's launch_executable mode).
+  launch: { command: 'C:\\Windows\\System32\\notepad.exe' },
 };
 
 const template = process.argv[2] ?? '2030';
@@ -138,7 +140,7 @@ try {
       check(`vm_launch ${launchSpec.command}`, la.ok, la.error);
       await sleep(3000);
       const wins2 = await call('vm_list_windows', { vm_id: vmId });
-      check('launched window is listed', wins2.ok && JSON.stringify(wins2.result).toLowerCase().includes(launchSpec.command.toLowerCase().replace(/\.exe$/, '')), wins2.result ?? wins2.error);
+      check('launched window is listed', wins2.ok && JSON.stringify(wins2.result).toLowerCase().includes(launchSpec.command.toLowerCase().split(/[\\/]/).pop()!.replace(/\.exe$/, '')), wins2.result ?? wins2.error);
     }
     const ty = await call('vm_type', { vm_id: vmId, text: 'vmhub e2e' });
     check('vm_type', ty.ok, ty.error);
