@@ -44,8 +44,10 @@ const LINUX: Profile = {
   checkDirty: 'test -e /root/marker && echo STILL-DIRTY || echo CLEAN',
 };
 
+// A scriptblock invocation: try/catch/finally is a statement, so it cannot be
+// used directly inside if(...) or piped — both are PowerShell parse errors.
 const PS_TCP = (host: string, port: number, ms: number) =>
-  `$c=New-Object Net.Sockets.TcpClient; try { $c.ConnectAsync('${host}',${port}).Wait(${ms}) } catch { $false } finally { $c.Close() }`;
+  `(& { $c = New-Object Net.Sockets.TcpClient; try { $c.ConnectAsync('${host}',${port}).Wait(${ms}) } catch { $false } finally { $c.Close() } })`;
 
 const WINDOWS: Profile = {
   whoami: '[Environment]::OSVersion.VersionString; whoami',

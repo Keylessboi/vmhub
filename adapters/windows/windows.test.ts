@@ -56,6 +56,13 @@ describe('WindowsAdapter availableTools', () => {
 });
 
 describe('PowerShell exec plumbing', () => {
+  it('treats CursorTouch\'s timeout prose as a timeout', async () => {
+    const a = new WindowsAdapter();
+    (a as unknown as { ps: unknown }).ps = async () => ({ exitCode: 1, output: 'Command execution timed out' });
+    const res = await a.exec({ uuid: 'u', ip: '10.10.10.5', status: 'ready' } as never, 'Start-Sleep 60');
+    expect(res.timedOut).toBe(true);
+  });
+
   it('finds the shell tool under every CursorTouch name', () => {
     for (const n of ['Shell', 'Powershell', 'PowerShell', 'Powershell-Tool']) expect(SHELL_TOOL_PATTERN.test(n)).toBe(true);
     for (const n of ['App', 'Screenshot', 'Shortcut']) expect(SHELL_TOOL_PATTERN.test(n)).toBe(false);

@@ -270,10 +270,14 @@ export class WindowsAdapter implements DesktopAdapter {
       : full;
     const { exitCode, output } = await this.ps(vm, wrapPowerShell(script, opts.cwd), opts.timeoutMs ?? 120_000);
     const cap = opts.outputCap ?? 200_000;
+    // CursorTouch reports its own timeout as prose, not a signal: surface it
+    // as timedOut so agents see the same contract as on Linux.
+    const timedOut = /command execution timed out/i.test(output);
     return {
       exitCode,
       stdout: output.length > cap ? output.slice(-cap) : output,
-      stderr: '',
+      stderr: timedOut ? `[vmhub: the guest stopped the command at its timeout]` : '',
+      timedOut,
       truncated: output.length > cap,
       durationMs: Date.now() - t0,
     };
