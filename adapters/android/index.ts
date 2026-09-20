@@ -31,7 +31,8 @@ import type {
 } from '../../src/shared/types.ts';
 import { CAPABILITIES } from '../../src/shared/types.ts';
 import { vmError } from '../../src/mcp/errors.ts';
-import { closeVmTunnels, sshHostArgs, vmTunnel } from '../transport.ts';
+import { randomUUID } from 'node:crypto';
+import { closeVmTunnels, jumpHostOpts, sshHostArgs, sshJumpTarget, vmTunnel } from '../transport.ts';
 import { pngDimensions } from '../windows/index.ts';
 import { runBounded, shq } from '../ssh-ops.ts';
 
@@ -300,16 +301,46 @@ export class AndroidAdapter implements DesktopAdapter {
       exitCode: m ? Number(m[1]) : res.exitCode,
       stdout: m ? stdout.slice(0, m.index) : stdout,
       stderr: res.stderr,
+      // the runner's verdict, not a guess: it owns the kill
+      timedOut: /\[vmhub: killed after \d+ms timeout\]/.test(res.stderr),
       durationMs: Date.now() - t0,
     };
   }
 
+  /**
+   * Move a file in. When adb runs on the Proxmox host, the agent's local
+   * path means nothing there, so the file is staged across first (and the
+   * staging copy is always cleaned up).
+   */
   async putFile(vm: Vm, localPath: string, remotePath: string): Promise<void> {
-    await this.adb(vm, ['push', localPath, remotePath]);
+    if ((await this.adbLocation()) === 'local') {
+      await this.adb(vm, ['push', localPath, remotePath], 1_800_000);
+      return;
+    }
+    const staged = `/tmp/vmhub-push-${randomUUID()}`;
+    const up = await runBounded('scp', [...jumpHostOpts(), localPath, `${sshJumpTarget()}:${staged}`], { timeoutMs: 1_800_000, outputCap: 20_000 });
+    if (up.exitCode !== 0) throw vmError('INTERNAL', `android put_file: staging ${localPath} to the Proxmox host failed: ${up.stderr.trim().slice(-300)}`);
+    try {
+      await this.adb(vm, ['push', staged, remotePath], 1_800_000);
+    } finally {
+      await runBounded('ssh', [...sshHostArgs(), `rm -f ${shq(staged)}`], { timeoutMs: 60_000, outputCap: 2_000 });
+    }
   }
 
+  /** Move a file out, staging through the Proxmox host when adb runs there. */
   async getFile(vm: Vm, remotePath: string, localPath: string): Promise<void> {
-    await this.adb(vm, ['pull', remotePath, localPath]);
+    if ((await this.adbLocation()) === 'local') {
+      await this.adb(vm, ['pull', remotePath, localPath], 1_800_000);
+      return;
+    }
+    const staged = `/tmp/vmhub-pull-${randomUUID()}`;
+    await this.adb(vm, ['pull', remotePath, staged], 1_800_000);
+    try {
+      const down = await runBounded('scp', [...jumpHostOpts(), `${sshJumpTarget()}:${staged}`, localPath], { timeoutMs: 1_800_000, outputCap: 20_000 });
+      if (down.exitCode !== 0) throw vmError('INTERNAL', `android get_file: copying ${remotePath} back failed: ${down.stderr.trim().slice(-300)}`);
+    } finally {
+      await runBounded('ssh', [...sshHostArgs(), `rm -f ${shq(staged)}`], { timeoutMs: 60_000, outputCap: 2_000 });
+    }
   }
 
   releaseConnection(vm: Vm): void {

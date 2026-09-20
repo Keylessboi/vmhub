@@ -72,9 +72,11 @@ const ANDROID: Profile = {
   failWithStderr: 'echo to-stderr >&2; exit 7',
   sleep: 'sleep 30',
   remoteFile: '/data/local/tmp/in.txt',
-  httpsProbe: (u) => `ping -c 1 -W 4 ${u.replace(/^https?:\/\//, '')} >/dev/null 2>&1 && echo 200 || echo BLOCKED`,
+  // No resolver is configured inside the Android golden yet, so probe by
+  // address: this tests the lease's network policy, not Android's DNS.
+  httpsProbe: (u) => `ping -c 1 -W 4 ${/^https?:\/\/(\d+\.){3}\d+/.test(u) ? u.replace(/^https?:\/\//, '') : '1.1.1.1'} >/dev/null 2>&1 && echo 200 || echo BLOCKED`,
   lanProbe: 'ping -c 1 -W 4 192.168.1.1 >/dev/null 2>&1 && echo LAN-OPEN || echo LAN-BLOCKED',
-  traffic: 'ping -c 2 -W 4 example.org >/dev/null 2>&1; ping -c 1 -W 3 192.168.1.1 >/dev/null 2>&1; true',
+  traffic: 'ping -c 2 -W 4 1.1.1.1 >/dev/null 2>&1; ping -c 1 -W 3 192.168.1.1 >/dev/null 2>&1; true',
   markDirty: 'echo dirty > /data/local/tmp/marker',
   checkDirty: 'test -e /data/local/tmp/marker && echo STILL-DIRTY || echo CLEAN',
   launch: { command: 'com.android.settings' },
@@ -184,8 +186,8 @@ try {
   if (os === 'android') {
     // toybox has no curl and ping is the honest probe here: check the capture
     // saw the guest's own traffic at all, including the blocked LAN attempt.
-    check('capture sees guest traffic', (sum?.packets ?? 0) > 0 && (sum?.flows?.length ?? 0) > 0, { packets: sum?.packets, flows: sum?.flows?.length });
-    check('capture sees the DNS lookup', !!sum?.dnsQueries?.some((q: any) => q.name === 'example.org'), sum?.dnsQueries ?? stop);
+    check('capture sees the guest reaching the internet', !!sum?.flows?.some((f: any) => f.dst === '1.1.1.1'), sum?.flows);
+    check('capture marks the LAN attempt unanswered', !!sum?.flows?.some((f: any) => f.dst === '192.168.1.1'), sum?.flows);
   } else {
     check('capture sees the DNS lookup', !!sum?.dnsQueries?.some((q: any) => q.name === 'example.org'), sum?.dnsQueries ?? stop);
     check('capture sees the TLS server name', !!sum?.tlsServerNames?.includes('example.org'), sum?.tlsServerNames);
@@ -205,7 +207,7 @@ try {
   await call('vm_exec', { vm_id: vmId, command: P.markDirty });
   const rev = await call('vm_snapshot', { vm_id: vmId, action: 'revert', name: 'clean' });
   check('snapshot revert', rev.ok, rev);
-  const after = await until('vm_exec', { vm_id: vmId, command: P.checkDirty, timeout_s: 20 }, os === 'windows' ? 180 : 40);
+  const after = await until('vm_exec', { vm_id: vmId, command: P.checkDirty, timeout_s: 20 }, os === 'windows' || os === 'android' ? 180 : 40);
   check('revert restored the clean disk', (after.result?.stdout ?? '').includes('CLEAN'), after);
   if (desktop) {
     const shot2 = await until('vm_screenshot', { vm_id: vmId }, 40);

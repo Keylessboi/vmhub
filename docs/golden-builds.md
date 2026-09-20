@@ -8,7 +8,32 @@
 | 2060 | x11-2404 | all pass | needed `ciupgrade=0` on clones, and X as a service (see below) |
 | 2070 | hyprland-2404 | all pass | rebuilt with `wtype` (hyprland-mcp's typing/key backend); old image kept as stopped VM 9071 |
 | 2100 | windows-11-24h2 | all pass | rebuilt 2026-09-19 (see below); old image kept as stopped VM 9102 |
-| 2110 | bliss-android16 | n/a | still a build VM, not a template — not leasable |
+| 2110 | bliss-android16 | leasable | rebuilt 2026-09-19: boots via a vmhub GRUB entry, static 10.10.10.100, adbd on 5555, `adb root` works. No resolver inside Android yet (see below) |
+
+**The Android golden (BlissOS 16.9.7 / Android 13).** What it needed, and
+what to keep in any rebuild:
+- **It did not boot at all.** The stock GRUB default hangs on QEMU's
+  display; BlissOS ships VM-safe variants under "VM Options". The golden now
+  boots a `vmhub-lab` entry (`nomodeset HWACCEL=0 SETUPWIZARD=0`) set as the
+  default, so nothing has to catch a 5-second menu. The image is a legacy
+  BIOS install — OVMF cannot boot it (`No bootable option`), despite the
+  earlier note here.
+- **No DHCP and no cloud-init.** dnsmasq on vmbr1 never answers Android's
+  DISCOVER, so the image configures itself from `/data/local/vmhub-net.sh`
+  (run at bootcomplete via a hook in `/system/etc/init.sh`): static
+  10.10.10.100, and — the part that is easy to miss — routes written into
+  Android's own routing tables (`local_network`, `eth0`), because Android
+  routes per network and a default route in `main` is ignored.
+- **Every clone carries that address**, so vmhub-lite refuses a second
+  Android lease rather than hand out a colliding VM.
+- **adbd on tcp 5555** (`service.adb.tcp.port`, plus a persisted
+  `persist.adb.tcp.port`), and `adb root` works — the adapter escalates on
+  connect, falling back to `su -c`.
+- **Known gap: no DNS inside Android.** `cmd netd resolver setnetdns` fails
+  (rc 218) and this build has no `cmd ethernet`, so names do not resolve;
+  traffic by IP works. The proper fix is an Ethernet IpConfiguration
+  (`/data/misc/ethernet/ipconfig.txt`) or setting it once in Settings and
+  re-sealing the golden.
 
 **The x11 desktop is a systemd service, not a login side effect.** The first
 golden ran `startx` from vmuser's `~/.bash_profile` on tty1 autologin. That
