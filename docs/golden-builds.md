@@ -7,7 +7,7 @@
 | 2030 | debian-13-golden (headless) | all pass | exec, files, network policy, capture, snapshots |
 | 2060 | x11-2404 | all pass | needed `ciupgrade=0` on clones (see below) |
 | 2070 | hyprland-2404 | all pass | rebuilt with `wtype` (hyprland-mcp's typing/key backend); old image kept as stopped VM 9071 |
-| 2100 | windows-11-24h2 | **fails** | every clone spends 15+ min in "Getting devices ready" with heavy disk I/O, and CursorTouch is not listening afterwards (no autostart recorded in the build steps) |
+| 2100 | windows-11-24h2 | all pass | rebuilt 2026-09-19 (see below); old image kept as stopped VM 9102 |
 | 2110 | bliss-android16 | n/a | still a build VM, not a template — not leasable |
 
 **Clones boot with `ciupgrade=0`.** Proxmox defaults cloud-init to a full
@@ -237,7 +237,31 @@ as unavailable until `qm template 2100` runs.
      `windows-mcp serve --transport streamable-http --host 0.0.0.0 --port 8000`
    - adapter connects to `http://<vm-ip>:8000/mcp/` with `Bearer <key>`
    - set `ANONYMIZED_TELEMETRY=false` (cloned goldens shouldn't phone home)
-7. **Convert to golden template** (after activation). The adapter
+7. **What the first golden got wrong** (all fixed in the 2026-09-19 rebuild, and what to preserve in any future Windows golden):
+   - **Do not leave the image generalized.** A sysprepped image re-ran
+     Windows' specialize pass on every clone: 15-20 minutes of "Getting
+     devices ready" and ~8 GB of disk writes per lease. The lab image is
+     specialized once, then templated; clones are ready in ~2 minutes.
+   - **Autologon is required.** CursorTouch drives the interactive desktop
+     and its scheduled task (`windows-mcp-server`) triggers *at logon*, so
+     with no autologon nothing ever started. Set `AutoAdminLogon`,
+     `DefaultUserName`, `DefaultPassword` under Winlogon.
+   - **`ip_allowlist` must contain the guest network** (`10.10.10.0/24`):
+     tool calls arrive from the bridge gateway, not the LAN, so the build's
+     `192.168.1.0/24` entry rejected everything with 403 Forbidden.
+   - **`exclude` must be empty.** The build excluded PowerShell, Registry,
+     Process and FileSystem — exactly the tools a lab VM exists to offer;
+     vm_exec and file transfer cannot work without PowerShell.
+   - **config.toml must not have a UTF-8 BOM** — the TOML parser fails with
+     "Invalid statement (at line 1, column 1)" and the server exits.
+   - The guest keeps a **static IP baked in**; cloud-init does not reach
+     Windows. vmhub-lite rewrites it to the lease address over the guest
+     agent at readiness, so the golden's own address does not matter.
+   - `scripts/cursortouch-tools.ts <vm-ip>` prints the in-VM tool surface;
+     check it after a CursorTouch upgrade, since the adapter maps
+     vm_* calls onto those exact tool names and argument shapes.
+
+8. **Convert to golden template** (after activation). The adapter
    (adapters/windows/index.ts) is wired for streamable-http + Bearer auth;
    set `CURSORTOUCH_AUTH_KEY` via Doppler/env.
 
