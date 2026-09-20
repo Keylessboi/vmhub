@@ -470,7 +470,7 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
         );
       }
     }
-    await settleReadiness(ctx, ctx.proxmox, uuid, pvm.vmid, templateId);
+    await settleReadiness(ctx, ctx.proxmox, uuid, pvm.vmid, templateId, tpl.os);
   };
 
   if (useLockedCreate) {
@@ -631,7 +631,7 @@ async function createRoutedLease(
               );
         }
       }
-      await settleReadiness(ctx, client, uuid, pvm.vmid, tpl.id);
+      await settleReadiness(ctx, client, uuid, pvm.vmid, tpl.id, tpl.os);
     });
   } else {
     const pvm = await ctx.nodeLock.run(nodeId, async () => {
@@ -676,7 +676,7 @@ async function createRoutedLease(
     }
     vm.status = USE_PROVISIONING ? "provisioning" : "starting";
     ctx.db.insertVm(vm);
-    await settleReadiness(ctx, client, uuid, pvm.vmid, tpl.id);
+    await settleReadiness(ctx, client, uuid, pvm.vmid, tpl.id, tpl.os);
   }
 
   try {
@@ -903,11 +903,12 @@ async function settleReadiness(
   uuid: string,
   vmid: number,
   templateId: string,
+  os?: Template["os"],
 ): Promise<void> {
   let inline = true;
   const done = (async (): Promise<{ available: boolean; reason?: string }> => {
     try {
-      const probe = await client.probeCapabilities(vmid);
+      const probe = await client.probeCapabilities(vmid, os);
       if (!inline && ctx.db.getVm(uuid)) {
         ctx.db.updateVmStatus(uuid, probe.available ? "ready" : "error");
         if (!probe.available) console.error(`[lite] vm ${vmid} not ready: ${probe.reason}`);

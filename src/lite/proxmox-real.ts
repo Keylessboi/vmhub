@@ -323,12 +323,14 @@ export class RealProxmox implements ProxmoxClient {
    * A guest that misses a step is still handed out with a reason (the
    * adapters retry) rather than destroyed.
    */
-  async probeCapabilities(vmid: number): Promise<{ available: boolean; reason?: string }> {
+  async probeCapabilities(vmid: number, os?: Template["os"]): Promise<{ available: boolean; reason?: string }> {
     const node = await this.node();
     const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { agent?: string; ostype?: string; ipconfig0?: string; name?: string };
     if ((await this.status(vmid)) !== "running") return { available: false, reason: `VM ${vmid} is not running` };
-    const windows = /^win/.test(config.ostype ?? "");
-    const android = osFromTemplateName(config.name) === "android";
+    const windows = os ? os === "windows" : /^win/.test(config.ostype ?? "");
+    // A clone is named for the template's VMID ("2110-abc"), so its own name
+    // never says "android" — the lease's template does.
+    const android = os ? os === "android" : osFromTemplateName(config.name) === "android";
     const budget = Number(windows || android ? process.env.VMHUB_BOOT_WAIT_WINDOWS_MS ?? 45 * 60_000 : process.env.VMHUB_BOOT_WAIT_MS ?? 180_000);
     const deadline = Date.now() + budget;
     const ip = android ? androidIp() : ipFromConfig(config.ipconfig0);

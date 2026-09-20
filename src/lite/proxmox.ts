@@ -73,7 +73,7 @@ export interface ProxmoxClient {
    * Returns available=true when all expected binaries are present, or
    * available=false with a reason listing what is missing.
    */
-  probeCapabilities(vmid: number): Promise<{ available: boolean; reason?: string }>;
+  probeCapabilities(vmid: number, os?: Template["os"]): Promise<{ available: boolean; reason?: string }>;
   /** Snapshots of a VM (the implicit "current" entry excluded), oldest first. */
   listSnapshots(vmid: number): Promise<VmSnapshot[]>;
   createSnapshot(vmid: number, name: string, opts?: { description?: string; withMemory?: boolean }): Promise<void>;
