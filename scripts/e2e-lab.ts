@@ -65,6 +65,21 @@ const WINDOWS: Profile = {
   launch: { command: 'C:\\Windows\\System32\\notepad.exe' },
 };
 
+/** Android: toybox shell over adb, root via `adb root`; no bash, no curl. */
+const ANDROID: Profile = {
+  whoami: 'id -u; getprop ro.build.version.release',
+  whoamiExpect: /^0/,
+  failWithStderr: 'echo to-stderr >&2; exit 7',
+  sleep: 'sleep 30',
+  remoteFile: '/data/local/tmp/in.txt',
+  httpsProbe: (u) => `ping -c 1 -W 4 ${u.replace(/^https?:\/\//, '')} >/dev/null 2>&1 && echo 200 || echo BLOCKED`,
+  lanProbe: 'ping -c 1 -W 4 192.168.1.1 >/dev/null 2>&1 && echo LAN-OPEN || echo LAN-BLOCKED',
+  traffic: 'ping -c 2 -W 4 example.org >/dev/null 2>&1; ping -c 1 -W 3 192.168.1.1 >/dev/null 2>&1; true',
+  markDirty: 'echo dirty > /data/local/tmp/marker',
+  checkDirty: 'test -e /data/local/tmp/marker && echo STILL-DIRTY || echo CLEAN',
+  launch: { command: 'com.android.settings' },
+};
+
 const template = process.argv[2] ?? '2030';
 const client = new Client({ name: 'e2e-lab', version: '0.1.0' });
 await client.connect(new StdioClientTransport({ command: 'bun', args: [join(import.meta.dir, '../src/mcp/index.ts')], env: process.env as Record<string, string>, stderr: 'inherit' }));
@@ -98,8 +113,8 @@ if (!created.ok) process.exit(1);
 const leaseId: string = created.result.lease.vmId;
 const vmId: string = created.result.vm.uuid;
 const os: string = created.result.vm.adapter;
-const P = os === 'windows' ? WINDOWS : LINUX;
-const desktop = os === 'hyprland' || os === 'x11' || os === 'windows';
+const P = os === 'windows' ? WINDOWS : os === 'android' ? ANDROID : LINUX;
+const desktop = os === 'hyprland' || os === 'x11' || os === 'windows' || os === 'android';
 console.log(`INFO  os=${os} vmid=${created.result.vm.vmid} ip=${created.result.vm.ip}`);
 try {
   let ready = created.result.ready;
@@ -135,6 +150,10 @@ try {
     const wins = await call('vm_list_windows', { vm_id: vmId });
     check('vm_list_windows answers', wins.ok, wins.error);
     const launchSpec = P.launch ?? (os === 'hyprland' ? await pickLinuxTerminal() : undefined);
+    if (os === 'android' && launchSpec) {
+      const la = await call('vm_launch', { vm_id: vmId, ...launchSpec });
+      check(`vm_launch ${launchSpec.command}`, la.ok, la.error);
+    } else
     if (launchSpec) {
       const la = await call('vm_launch', { vm_id: vmId, ...launchSpec });
       check(`vm_launch ${launchSpec.command}`, la.ok, la.error);
@@ -162,10 +181,17 @@ try {
   await sleep(1500);
   const stop = await call('vm_capture', { vm_id: vmId, action: 'stop' });
   const sum = stop.result?.summary;
-  check('capture sees the DNS lookup', !!sum?.dnsQueries?.some((q: any) => q.name === 'example.org'), sum?.dnsQueries ?? stop);
-  check('capture sees the TLS server name', !!sum?.tlsServerNames?.includes('example.org'), sum?.tlsServerNames);
-  check('capture sees the HTTP request', !!sum?.httpRequests?.some((h: string) => h.includes('example.com')), sum?.httpRequests);
-  check('capture marks the LAN attempt unanswered', !!sum?.flows?.some((f: any) => f.dst === '192.168.1.1' && f.unanswered === true), sum?.flows);
+  if (os === 'android') {
+    // toybox has no curl and ping is the honest probe here: check the capture
+    // saw the guest's own traffic at all, including the blocked LAN attempt.
+    check('capture sees guest traffic', (sum?.packets ?? 0) > 0 && (sum?.flows?.length ?? 0) > 0, { packets: sum?.packets, flows: sum?.flows?.length });
+    check('capture sees the DNS lookup', !!sum?.dnsQueries?.some((q: any) => q.name === 'example.org'), sum?.dnsQueries ?? stop);
+  } else {
+    check('capture sees the DNS lookup', !!sum?.dnsQueries?.some((q: any) => q.name === 'example.org'), sum?.dnsQueries ?? stop);
+    check('capture sees the TLS server name', !!sum?.tlsServerNames?.includes('example.org'), sum?.tlsServerNames);
+    check('capture sees the HTTP request', !!sum?.httpRequests?.some((h: string) => h.includes('example.com')), sum?.httpRequests);
+    check('capture marks the LAN attempt unanswered', !!sum?.flows?.some((f: any) => f.dst === '192.168.1.1' && f.unanswered === true), sum?.flows);
+  }
 
   const iso = await call('vm_network', { vm_id: vmId, mode: 'isolated' });
   check('switch to isolated', iso.result?.mode === 'isolated' && iso.result?.enforced === true, iso);

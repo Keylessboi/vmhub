@@ -118,7 +118,9 @@ export function osFromTemplateName(name: string | undefined): Template["os"] {
   const n = (name ?? "").toLowerCase();
   if (n.startsWith("hyprland")) return "hyprland";
   if (n.startsWith("windows") || n.startsWith("win")) return "windows";
-  if (n.startsWith("android")) return "android";
+  // Android goldens are named for their distro as often as the OS
+  // ("bliss-android16"), so match anywhere in the name.
+  if (n.includes("android") || n.startsWith("bliss")) return "android";
   if (n.startsWith("x11") || n.startsWith("ubuntu-x11")) return "x11";
   return "headless";
 }
@@ -129,7 +131,18 @@ export function osFromTemplateName(name: string | undefined): Template["os"] {
  */
 function templateCapabilities(os: Template["os"]): Template["capabilities"] {
   if (os === "headless") return ["exec"];
-  return ["screenshot", "inspect", "list_windows", "click", "type", "key", "drag", "exec"];
+  const desktop: Template["capabilities"] = ["screenshot", "inspect", "list_windows", "click", "type", "key", "drag", "exec"];
+  // adb moves files as itself; the other goldens go through scp/PowerShell.
+  return os === "android" ? [...desktop, "put_file", "get_file"] : desktop;
+}
+
+/**
+ * Android goldens carry their address in the image (no cloud-init, and DHCP
+ * is unanswered on the guest bridge), so every clone comes up on the same
+ * one — which is also why only one Android lease can exist at a time.
+ */
+export function androidIp(env: NodeJS.ProcessEnv = process.env): string {
+  return env.VMHUB_ANDROID_IP ?? "10.10.10.100";
 }
 
 export class RealProxmox implements ProxmoxClient {
@@ -262,6 +275,13 @@ export class RealProxmox implements ProxmoxClient {
     // (reaper matches vmhub-* tags, never VMIDs). Set it right after cloning,
     // before the VM can be observed as tag-less by any sweep.
     // A static IP is set the same way: deterministic transport, no DHCP race.
+    const os = osFromTemplateName((await this.listTemplates()).find((t) => t.id === input.templateId)?.notes?.replace(/^Golden template /, ""));
+    if (os === "android") {
+      // No cloud-init drive and no DHCP: the image configures itself.
+      await this.request("POST", `/nodes/${node}/qemu/${vmid}/config`, { tags: input.proxmoxTag });
+      const cfg = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string };
+      return this.toVm({ vmid, name: input.name, status: "provisioning" }, this.parseTags(cfg), node, androidIp());
+    }
     const vmIp = this.pool.allocate();
     await this.request("POST", `/nodes/${node}/qemu/${vmid}/config`, {
       tags: input.proxmoxTag,
@@ -305,12 +325,13 @@ export class RealProxmox implements ProxmoxClient {
    */
   async probeCapabilities(vmid: number): Promise<{ available: boolean; reason?: string }> {
     const node = await this.node();
-    const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { agent?: string; ostype?: string; ipconfig0?: string };
+    const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { agent?: string; ostype?: string; ipconfig0?: string; name?: string };
     if ((await this.status(vmid)) !== "running") return { available: false, reason: `VM ${vmid} is not running` };
     const windows = /^win/.test(config.ostype ?? "");
-    const budget = Number(windows ? process.env.VMHUB_BOOT_WAIT_WINDOWS_MS ?? 45 * 60_000 : process.env.VMHUB_BOOT_WAIT_MS ?? 180_000);
+    const android = osFromTemplateName(config.name) === "android";
+    const budget = Number(windows || android ? process.env.VMHUB_BOOT_WAIT_WINDOWS_MS ?? 45 * 60_000 : process.env.VMHUB_BOOT_WAIT_MS ?? 180_000);
     const deadline = Date.now() + budget;
-    const ip = ipFromConfig(config.ipconfig0);
+    const ip = android ? androidIp() : ipFromConfig(config.ipconfig0);
 
     if (config.agent && /^(1|enabled=1)/.test(String(config.agent))) {
       let up = false;
@@ -330,7 +351,7 @@ export class RealProxmox implements ProxmoxClient {
       }
     }
     if (!ip || process.env.VMHUB_READY_PORT_CHECK === "0") return { available: true };
-    const port = windows ? Number(process.env.CURSORTOUCH_PORT ?? 8000) : 22;
+    const port = android ? Number(process.env.ADB_PORT ?? 5555) : windows ? Number(process.env.CURSORTOUCH_PORT ?? 8000) : 22;
     while (Date.now() < deadline) {
       if (await tcpOpen(ip, port)) return { available: true };
       await new Promise((r) => setTimeout(r, 5000));

@@ -368,6 +368,19 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
   }
   if (tpl.availability !== "available") throw unavailableTemplate(tpl);
 
+  // Android images carry their IP (no cloud-init, no DHCP on the bridge), so
+  // two Android leases would collide on the same address.
+  if (tpl.os === "android") {
+    const live = ctx.db.listVms().find((v) => v.adapter === "android" && v.status !== "destroyed");
+    if (live) {
+      throw vmError(
+        "HOST_CAPACITY",
+        `an Android lease already exists (vm ${live.uuid}); the Android golden has a fixed guest IP, so only one runs at a time`,
+        "release the other Android lease first",
+      );
+    }
+  }
+
   await assertDiskSpace(ctx);
 
   const requestedTtl = positiveMs(body.ttl_ms) ?? positiveMs(body.ttlMs);
