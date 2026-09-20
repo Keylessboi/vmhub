@@ -144,7 +144,7 @@ describe("ipFromConfig", () => {
 
 describe("guestDns", () => {
   it("defaults to public resolvers, never the host's tailnet DNS", () => {
-    expect(guestDns({})).toBe("1.1.1.1 9.9.9.9");
+    expect(guestDns({})).toBe("9.9.9.9 149.112.112.112");
     expect(guestDns({ VMHUB_GUEST_DNS: "10.10.10.1, 8.8.8.8" })).toBe("10.10.10.1 8.8.8.8");
   });
 });

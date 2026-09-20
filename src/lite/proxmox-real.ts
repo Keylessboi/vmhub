@@ -687,7 +687,8 @@ export function ipFromConfig(ipconfig?: string): string | undefined {
 
 /** Resolvers written into every lease VM's cloud-init (VMHUB_GUEST_DNS, space-separated). */
 export function guestDns(env: NodeJS.ProcessEnv = process.env): string {
-  return (env.VMHUB_GUEST_DNS ?? "1.1.1.1 9.9.9.9").trim().split(/[\s,]+/).join(" ");
+  // Quad9 (9.9.9.9 / 149.112.112.112): the lab's default resolver.
+  return (env.VMHUB_GUEST_DNS ?? "9.9.9.9 149.112.112.112").trim().split(/[\s,]+/).join(" ");
 }
 
 /** Can we open a TCP connection to host:port within 3s? */

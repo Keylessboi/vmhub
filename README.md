@@ -150,6 +150,8 @@ vm_snapshot     { action: "revert", name: "clean" }
 
 Network policy is enforced by the Proxmox per-VM firewall, outside the guest. `internet` drops 10/8, 172.16/12, 192.168/16, 100.64/10 and 169.254/16 (DNS to the host gateway is allowed); `isolated` drops all outbound traffic. The host's inbound control path (SSH, CursorTouch, adb) works in both. `enforced: false` in a response means the datacenter firewall is off and nothing is being blocked. New leases get `VMHUB_DEFAULT_NETWORK` (`internet` unless set to `unmanaged`); an explicit `network` on `vm_lease_create` is a hard requirement — the lease fails rather than boot unenforced.
 
+Lease VMs resolve through Quad9 (9.9.9.9, 149.112.112.112) unless `VMHUB_GUEST_DNS` says otherwise.
+
 Capture needs `tcpdump` on the Proxmox host. Captures are written to `~/.local/share/vmhub/captures/` (`VMHUB_CAPTURE_DIR`).
 
 ## Workstation setup (control plane on the Proxmox host)
