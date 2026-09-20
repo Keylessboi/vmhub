@@ -5,10 +5,19 @@
 | VMID | Golden | E2E | Notes |
 |---|---|---|---|
 | 2030 | debian-13-golden (headless) | all pass | exec, files, network policy, capture, snapshots |
-| 2060 | x11-2404 | all pass | needed `ciupgrade=0` on clones (see below) |
+| 2060 | x11-2404 | all pass | needed `ciupgrade=0` on clones, and X as a service (see below) |
 | 2070 | hyprland-2404 | all pass | rebuilt with `wtype` (hyprland-mcp's typing/key backend); old image kept as stopped VM 9071 |
 | 2100 | windows-11-24h2 | all pass | rebuilt 2026-09-19 (see below); old image kept as stopped VM 9102 |
 | 2110 | bliss-android16 | n/a | still a build VM, not a template — not leasable |
+
+**The x11 desktop is a systemd service, not a login side effect.** The first
+golden ran `startx` from vmuser's `~/.bash_profile` on tty1 autologin. That
+races with boot and loses often enough to matter: the clone comes up with no
+X server at all, so screenshots and xdotool fail while SSH works fine. The
+rebuilt golden ships `vmhub-x11.service` (Xorg + openbox on vt2, `User=vmuser`,
+`PAMName=login`, `Restart=always`), sets `allowed_users=anybody` in
+`/etc/X11/Xwrapper.config` (a unit is not a console user), and the
+`.bash_profile` block is disabled so the two cannot both start X.
 
 **Clones boot with `ciupgrade=0`.** Proxmox defaults cloud-init to a full
 `dist-upgrade` on a clone's first boot. On the x11 golden that replaced
