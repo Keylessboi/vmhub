@@ -72,11 +72,11 @@ const ANDROID: Profile = {
   failWithStderr: 'echo to-stderr >&2; exit 7',
   sleep: 'sleep 30',
   remoteFile: '/data/local/tmp/in.txt',
-  // No resolver is configured inside the Android golden yet, so probe by
-  // address: this tests the lease's network policy, not Android's DNS.
-  httpsProbe: (u) => `ping -c 1 -W 4 ${/^https?:\/\/(\d+\.){3}\d+/.test(u) ? u.replace(/^https?:\/\//, '') : '1.1.1.1'} >/dev/null 2>&1 && echo 200 || echo BLOCKED`,
+  httpsProbe: (u) => `ping -c 1 -W 4 ${u.replace(/^https?:\/\//, '')} >/dev/null 2>&1 && echo 200 || echo BLOCKED`,
   lanProbe: 'ping -c 1 -W 4 192.168.1.1 >/dev/null 2>&1 && echo LAN-OPEN || echo LAN-BLOCKED',
-  traffic: 'ping -c 2 -W 4 1.1.1.1 >/dev/null 2>&1; ping -c 1 -W 3 192.168.1.1 >/dev/null 2>&1; true',
+  // A name the internet check did not already resolve: Android's netd caches,
+  // so re-using example.org would emit no DNS query during the capture.
+  traffic: 'ping -c 2 -W 4 example.net >/dev/null 2>&1; ping -c 1 -W 3 192.168.1.1 >/dev/null 2>&1; true',
   markDirty: 'echo dirty > /data/local/tmp/marker',
   checkDirty: 'test -e /data/local/tmp/marker && echo STILL-DIRTY || echo CLEAN',
   launch: { command: 'com.android.settings' },
@@ -189,8 +189,8 @@ try {
   if (os === 'android') {
     // toybox has no curl and ping is the honest probe here: check the capture
     // saw the guest's own traffic at all, including the blocked LAN attempt.
-    check('capture sees the guest reaching the internet', !!sum?.flows?.some((f: any) => f.dst === '1.1.1.1'), sum?.flows);
-    check('capture marks the LAN attempt unanswered', !!sum?.flows?.some((f: any) => f.dst === '192.168.1.1'), sum?.flows);
+    check('capture sees the DNS lookup', !!sum?.dnsQueries?.some((q: any) => q.name === 'example.net'), sum?.dnsQueries ?? stop);
+    check('capture sees the guest reaching the internet', !!sum?.flows?.some((f: any) => (f.names ?? []).includes('example.net') || f.proto === 'icmp'), sum?.flows);
   } else {
     check('capture sees the DNS lookup', !!sum?.dnsQueries?.some((q: any) => q.name === 'example.org'), sum?.dnsQueries ?? stop);
     check('capture sees the TLS server name', !!sum?.tlsServerNames?.includes('example.org'), sum?.tlsServerNames);
