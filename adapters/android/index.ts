@@ -32,6 +32,7 @@ import type {
 import { CAPABILITIES } from '../../src/shared/types.ts';
 import { vmError } from '../../src/mcp/errors.ts';
 import { closeVmTunnels, sshHostArgs, vmTunnel } from '../transport.ts';
+import { pngDimensions } from '../windows/index.ts';
 import { runBounded, shq } from '../ssh-ops.ts';
 
 const execFileP = promisify(execFile);
@@ -178,10 +179,30 @@ export class AndroidAdapter implements DesktopAdapter {
     return this.privilegeOf(vm) === 'su' ? `su -c ${shq(script)}` : script;
   }
 
+  /** adb's own words for "this cached device is stale; reconnect". */
+  private static readonly STALE = /device offline|device .*not found|device still (?:authorizing|connecting)|closed/i;
+
+  /**
+   * Run an adb call, reconnecting once if the daemon's cached device went
+   * stale (the VM rebooted, was reverted, or the golden was re-templated
+   * while the host's adb server still held the endpoint).
+   */
+  private async adbCall(vm: Vm, build: (serial: string) => string[], opts: { buffer?: boolean; timeoutMs?: number }): Promise<{ stdout: string | Buffer; stderr: string; exitCode: number }> {
+    const serial = await this.ensureConnected(vm);
+    let res = await this.adbRun(build(serial), opts);
+    if (res.exitCode !== 0 && AndroidAdapter.STALE.test(`${res.stderr}${res.stdout}`)) {
+      this.serials.delete(vm.uuid);
+      this.privilege.delete(vm.uuid);
+      await this.adbRun(['disconnect', serial], { timeoutMs: 15_000 });
+      const fresh = await this.ensureConnected(vm);
+      res = await this.adbRun(build(fresh), opts);
+    }
+    return res;
+  }
+
   /** adb text call for one VM (always with -s; errors carry adb's message). */
   private async adb(vm: Vm, args: string[], timeoutMs = 120_000): Promise<string> {
-    const serial = await this.ensureConnected(vm);
-    const res = await this.adbRun(['-s', serial, ...args], { timeoutMs });
+    const res = await this.adbCall(vm, (serial) => ['-s', serial, ...args], { timeoutMs });
     if (res.exitCode !== 0) {
       throw vmError(
         'INTERNAL',
@@ -194,8 +215,7 @@ export class AndroidAdapter implements DesktopAdapter {
 
   /** Binary adb exec-out (screencap, file reads). */
   private async adbOut(vm: Vm, args: string[], timeoutMs = 120_000): Promise<Buffer> {
-    const serial = await this.ensureConnected(vm);
-    const res = await this.adbRun(['-s', serial, 'exec-out', ...args], { buffer: true, timeoutMs });
+    const res = await this.adbCall(vm, (serial) => ['-s', serial, 'exec-out', ...args], { buffer: true, timeoutMs });
     if (res.exitCode !== 0) {
       throw vmError('INTERNAL', `android adapter: adb exec-out ${args[0] ?? ''} failed: ${res.stderr.trim().slice(-400)}`);
     }
@@ -206,11 +226,16 @@ export class AndroidAdapter implements DesktopAdapter {
     await this.ensureConnected(vm);
     // screencap emits binary PNG — request a Buffer, not a string.
     const stdout = await this.adbOut(vm, ['screencap', '-p']);
+    const { width, height } = pngDimensions(stdout);
+    if (!stdout.length || width === 0 || height === 0) {
+      throw vmError('INTERNAL', 'android screenshot: screencap returned no image',
+        'The device may still be booting or the screen is off — retry, or wake it with vm_key.');
+    }
     return {
       image: stdout,
       format: 'png',
-      width: 0,
-      height: 0,
+      width,
+      height,
       coordMapping: { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 },
     };
   }
@@ -263,10 +288,10 @@ export class AndroidAdapter implements DesktopAdapter {
    */
   async exec(vm: Vm, cmd: string, args: string[] = [], opts: ExecOptions = {}): Promise<ExecResult> {
     const t0 = Date.now();
-    const serial = await this.ensureConnected(vm);
+    await this.ensureConnected(vm);
     const full = [cmd, ...args.map(shq)].join(' ');
     const script = opts.cwd ? `cd ${shq(opts.cwd)} && ${full}` : full;
-    const res = await this.adbRun(['-s', serial, 'shell', `${this.asRoot(vm, script)}; echo "__vmhub_rc=$?"`], {
+    const res = await this.adbCall(vm, (serial) => ['-s', serial, 'shell', `${this.asRoot(vm, script)}; echo "__vmhub_rc=$?"`], {
       timeoutMs: opts.timeoutMs ?? 120_000,
     });
     const stdout = String(res.stdout);
@@ -294,14 +319,35 @@ export class AndroidAdapter implements DesktopAdapter {
     closeVmTunnels(vm);
   }
 
+  /**
+   * Android's window verbs are activities, not windows: launch starts an
+   * app (a bare package goes through the launcher intent, `pkg/activity`
+   * starts that component), focus brings it forward, close force-stops it.
+   */
   async dispatch(vm: Vm, verb: string, args: Record<string, unknown>): Promise<unknown> {
-    if (verb === 'launch') {
-      const pkg = String(args.package ?? args.pkg ?? '');
-      if (!pkg) throw vmError('INVALID_REQUEST', 'android launch: package required');
-      return this.adb(vm, ['shell', 'am', 'start', '-n', pkg]);
+    const target = String(args.package ?? args.pkg ?? args.command ?? args.name ?? args.window ?? '');
+    switch (verb) {
+      case 'launch':
+      case 'focus': {
+        if (!target) throw vmError('INVALID_REQUEST', `android ${verb}: package (or package/activity) required`);
+        const out = target.includes('/')
+          ? await this.adb(vm, ['shell', 'am', 'start', '-n', target])
+          : await this.adb(vm, ['shell', 'monkey', '-p', target, '-c', 'android.intent.category.LAUNCHER', '1']);
+        if (/Error|Exception|No activities found/i.test(out)) {
+          throw vmError('NOT_FOUND', `android ${verb}: ${target} did not start: ${out.trim().slice(-300)}`, 'List packages with vm_exec "pm list packages".');
+        }
+        return { started: target, detail: out.trim().slice(0, 300) };
+      }
+      case 'close': {
+        if (!target) throw vmError('INVALID_REQUEST', 'android close: package required');
+        await this.adb(vm, ['shell', 'am', 'force-stop', target]);
+        return { stopped: target };
+      }
+      default:
+        throw vmError('CAPABILITY_UNAVAILABLE', `android dispatch: unknown verb "${verb}"`);
     }
-    throw vmError('CAPABILITY_UNAVAILABLE', `android dispatch: unknown verb "${verb}"`);
   }
+
 }
 
 /** Map a chord like "home"/"back"/"enter" to an Android keyevent code. */
