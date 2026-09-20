@@ -48,6 +48,9 @@ interface WindowsConnection {
 /** CursorTouch/Windows-MCP has shipped its shell tool as Shell, Powershell and Powershell-Tool. */
 export const SHELL_TOOL_PATTERN = /^(power)?shell(-tool)?$/i;
 
+/** A cold Windows desktop can take minutes to answer the first UI call. */
+export const UI_CALL_TIMEOUT_MS = Number(process.env.CURSORTOUCH_TIMEOUT_MS ?? 180_000);
+
 /** Base64 characters per PowerShell call when moving files (well under the 32K command-line cap). */
 const FILE_CHUNK_B64 = 24_000;
 
@@ -148,7 +151,7 @@ export class WindowsAdapter implements DesktopAdapter {
 
   async screenshot(vm: Vm, opts?: { jpeg?: boolean }): Promise<ScreenshotResult> {
     const conn = await this.ensureConnection(vm);
-    const res = await conn.client.callTool({ name: 'Screenshot', arguments: {} });
+    const res = await conn.client.callTool({ name: 'Screenshot', arguments: {} }, { timeout: UI_CALL_TIMEOUT_MS });
     const image = extractImage(res.content);
     const { width, height } = pngDimensions(image.data);
     if (width === 0 || height === 0) {
@@ -163,41 +166,47 @@ export class WindowsAdapter implements DesktopAdapter {
     };
   }
 
+  /**
+   * CursorTouch's input tools take a point as `loc: [x, y]`, a chord as
+   * `shortcut`, a drag as Move{from_loc, loc, drag} and a clipboard write as
+   * Clipboard{mode:'set', text} — not the field names vmhub uses internally.
+   */
   async input(vm: Vm, action: InputAction): Promise<void> {
     const conn = await this.ensureConnection(vm);
+    const call = (name: string, args: Record<string, unknown>): Promise<unknown> =>
+      conn.client.callTool({ name, arguments: args }, { timeout: UI_CALL_TIMEOUT_MS });
     switch (action.kind) {
       case 'click':
-        await conn.client.callTool({ name: 'Click', arguments: { x: action.x, y: action.y } });
+        await call('Click', { loc: [action.x, action.y], button: action.button ?? 'left', clicks: 1 });
         return;
       case 'type':
-        await conn.client.callTool({ name: 'Type', arguments: { text: action.text } });
+        await call('Type', { text: action.text, press_enter: false });
         return;
       case 'key':
-        await conn.client.callTool({ name: 'Shortcut', arguments: { keys: action.chord } });
+        await call('Shortcut', { shortcut: action.chord });
         return;
       case 'drag':
-        await conn.client.callTool({
-          name: 'Move',
-          arguments: { start_x: action.from.x, start_y: action.from.y, end_x: action.to.x, end_y: action.to.y, drag: true },
-        });
+        await call('Move', { from_loc: [action.from.x, action.from.y], loc: [action.to.x, action.to.y], drag: true });
         return;
       case 'paste':
-        await conn.client.callTool({ name: 'Clipboard', arguments: { text: action.text } });
+        await call('Clipboard', { mode: 'set', text: action.text });
+        await call('Shortcut', { shortcut: 'ctrl+v' });
         return;
       case 'gesture':
         throw vmError('CAPABILITY_UNAVAILABLE', 'windows adapter: gestures not supported');
     }
   }
 
+
   async listWindows(vm: Vm, filter?: string): Promise<WindowInfo[]> {
     const conn = await this.ensureConnection(vm);
-    const res = await conn.client.callTool({ name: 'Snapshot', arguments: {} });
+    const res = await conn.client.callTool({ name: 'Snapshot', arguments: {} }, { timeout: UI_CALL_TIMEOUT_MS });
     return parseSnapshotWindows(textContent(res.content as unknown[]) ?? '', filter);
   }
 
   async inspect(vm: Vm): Promise<SemanticElement> {
     const conn = await this.ensureConnection(vm);
-    const res = await conn.client.callTool({ name: 'Snapshot', arguments: {} });
+    const res = await conn.client.callTool({ name: 'Snapshot', arguments: {} }, { timeout: UI_CALL_TIMEOUT_MS });
     const text = decodeSnapshotText(textContent(res.content as unknown[]) ?? '');
     return {
       role: 'window',
