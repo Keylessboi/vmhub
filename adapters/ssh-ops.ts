@@ -30,22 +30,36 @@ interface RunOpts {
   timeoutMs: number;
   stdin?: string | Buffer;
   outputCap: number;
+  /** Keep stdout as bytes (screenshots, file pulls) in `stdoutRaw`. */
+  binary?: boolean;
 }
 
+/** ExecResult plus the raw stdout bytes when `binary` was requested. */
+export type RunResult = ExecResult & { stdoutRaw?: Buffer };
+
 /** Spawn a process, collect bounded output, enforce a hard timeout. */
-export function runBounded(bin: string, args: string[], opts: RunOpts): Promise<ExecResult> {
+export function runBounded(bin: string, args: string[], opts: RunOpts): Promise<RunResult> {
   const t0 = Date.now();
   return new Promise((resolve) => {
     const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
     let timedOut = false;
+    const chunks: Buffer[] = [];
+    let rawBytes = 0;
     // Keep at most 2x the cap in memory; capTail trims precisely at the end.
     const keep = (buf: string, d: Buffer): string => {
       const next = buf + d.toString('utf8');
       return next.length > opts.outputCap * 2 ? next.slice(-opts.outputCap * 2) : next;
     };
-    child.stdout.on('data', (d: Buffer) => { out = keep(out, d); });
+    child.stdout.on('data', (d: Buffer) => {
+      if (opts.binary) {
+        rawBytes += d.length;
+        if (rawBytes <= opts.outputCap) chunks.push(d);
+        return;
+      }
+      out = keep(out, d);
+    });
     child.stderr.on('data', (d: Buffer) => { err = keep(err, d); });
     const timer = setTimeout(() => {
       timedOut = true;
@@ -57,11 +71,12 @@ export function runBounded(bin: string, args: string[], opts: RunOpts): Promise<
       const o = capTail(out, opts.outputCap);
       const e = capTail(err, opts.outputCap);
       resolve({
+        ...(opts.binary ? { stdoutRaw: Buffer.concat(chunks) } : {}),
         exitCode: code ?? (signal ? 128 : 1),
-        stdout: o.text,
+        stdout: opts.binary ? '' : o.text,
         stderr: timedOut ? `${e.text}\n[vmhub: killed after ${opts.timeoutMs}ms timeout]` : e.text,
         timedOut,
-        truncated: o.truncated || e.truncated,
+        truncated: opts.binary ? rawBytes > opts.outputCap : o.truncated || e.truncated,
         durationMs: Date.now() - t0,
       });
     });

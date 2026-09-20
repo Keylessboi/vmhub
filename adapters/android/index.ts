@@ -31,10 +31,13 @@ import type {
 } from '../../src/shared/types.ts';
 import { CAPABILITIES } from '../../src/shared/types.ts';
 import { vmError } from '../../src/mcp/errors.ts';
-import { closeVmTunnels, vmTunnel } from '../transport.ts';
+import { closeVmTunnels, sshHostArgs, vmTunnel } from '../transport.ts';
 import { runBounded, shq } from '../ssh-ops.ts';
 
 const execFileP = promisify(execFile);
+
+/** How the adapter reaches root inside the guest. */
+export type Privilege = 'root' | 'su' | 'shell';
 
 /** Default ADB port — override with ADB_PORT. */
 export const ADB_PORT = 5555;
@@ -49,11 +52,13 @@ export class AndroidAdapter implements DesktopAdapter {
     semantic: 'uiautomator' as const,
     files: ['adb'] as FileCapability[],
     exec: true,
-    notes: 'Android via host-side ADB over the VM network (android-9-golden).',
+    notes: 'Android via ADB (root when the image allows it); adb runs on the MCP host or the Proxmox host.',
   };
 
   /** vm uuid -> adb serial (host:port of the tunnel endpoint). */
   private serials = new Map<string, string>();
+  private privilege = new Map<string, Privilege>();
+  private location?: 'local' | 'jump';
 
   availableTools(): CapabilityId[] {
     return [
@@ -73,50 +78,128 @@ export class AndroidAdapter implements DesktopAdapter {
   }
 
   /**
-   * Connect to the VM's adbd through an SSH tunnel (the guest network is
-   * not routable from the MCP host) and return the adb serial. Every adb
-   * call passes `-s <serial>` — without it adb refuses as soon as a second
-   * device (another lease, a phone) is attached.
+   * Where adb runs. The MCP host is the natural place, but a workstation
+   * often has no android-tools while the Proxmox host does — and the host
+   * also reaches the guest network directly, so no tunnel is needed there.
+   * VMHUB_ADB=local|jump forces it; the default probes for a local adb once.
+   */
+  private async adbLocation(): Promise<'local' | 'jump'> {
+    const forced = process.env.VMHUB_ADB;
+    if (forced === 'local' || forced === 'jump') return forced;
+    if (this.location) return this.location;
+    try {
+      await execFileP('adb', ['version']);
+      this.location = 'local';
+    } catch {
+      this.location = 'jump';
+    }
+    return this.location;
+  }
+
+  /** Run one adb invocation, locally or on the Proxmox host. */
+  private async adbRun(args: string[], opts: { buffer?: boolean; timeoutMs?: number } = {}): Promise<{ stdout: string | Buffer; stderr: string; exitCode: number }> {
+    const where = await this.adbLocation();
+    const max = 64 * 1024 * 1024;
+    if (where === 'local') {
+      const res = await runBounded('adb', args, { timeoutMs: opts.timeoutMs ?? 120_000, outputCap: max, binary: opts.buffer });
+      return { stdout: res.stdoutRaw ?? res.stdout, stderr: res.stderr, exitCode: res.exitCode };
+    }
+    const remote = ['adb', ...args.map(shq)].join(' ');
+    const res = await runBounded('ssh', [...sshHostArgs(), remote], { timeoutMs: opts.timeoutMs ?? 120_000, outputCap: max, binary: opts.buffer });
+    return { stdout: res.stdoutRaw ?? res.stdout, stderr: res.stderr, exitCode: res.exitCode };
+  }
+
+  /**
+   * Connect to the VM's adbd and escalate to root. Android-x86 lab images
+   * run userdebug, where `adb root` restarts adbd as root — that is what
+   * makes /data, /system and other apps' files reachable. A production
+   * build refuses; then commands go through `su -c` if the image has su,
+   * and otherwise run as the shell user (reported in capabilities).
    */
   private async ensureConnected(vm: Vm): Promise<string> {
     const known = this.serials.get(vm.uuid);
     if (known) return known;
     if (!vm.ip) throw vmError('INTERNAL', 'android adapter: VM has no IP (not leased?)', 'Lease the VM first');
-    const { host, port } = await vmTunnel(vm, Number(process.env.ADB_PORT ?? ADB_PORT));
-    const serial = `${host}:${port}`;
+    const port = Number(process.env.ADB_PORT ?? ADB_PORT);
+    const endpoint = (await this.adbLocation()) === 'jump'
+      ? { host: vm.ip, port } // the Proxmox host routes the guest network itself
+      : await vmTunnel(vm, port);
+    const serial = `${endpoint.host}:${endpoint.port}`;
+    const connect = async (): Promise<void> => {
+      const res = await this.adbRun(['connect', serial], { timeoutMs: 30_000 });
+      const out = `${res.stdout}${res.stderr}`;
+      if (/unable|failed|cannot|refused/i.test(out)) throw new Error(out.trim() || `adb connect ${serial} failed`);
+    };
     try {
-      const { stdout } = await execFileP('adb', ['connect', serial]);
-      if (/unable|failed|cannot/i.test(stdout)) throw new Error(stdout.trim());
+      await connect();
       this.serials.set(vm.uuid, serial);
+      this.privilege.set(vm.uuid, await this.escalate(serial, connect));
       return serial;
     } catch (e) {
+      this.serials.delete(vm.uuid);
       throw vmError(
         'INTERNAL',
         `android adapter: adb connect ${serial} failed (${e instanceof Error ? e.message : String(e)})`,
-        'Ensure adb is installed and the Android golden has ADB-over-network enabled (:5555).',
+        'Ensure the Android golden has ADB-over-network enabled (:5555) and adb is available (locally or on VMHUB_JUMP_HOST).',
       );
     }
   }
 
-  private async adb(vm: Vm, args: string[]): Promise<string> {
+  /** `adb root`, then `su` — whichever the image allows. */
+  private async escalate(serial: string, reconnect: () => Promise<void>): Promise<Privilege> {
+    const root = await this.adbRun(['-s', serial, 'root'], { timeoutMs: 30_000 });
+    const said = `${root.stdout}${root.stderr}`;
+    if (!/cannot run as root|production build/i.test(said)) {
+      // adbd restarts: the socket drops, so reconnect and wait for the daemon.
+      await new Promise((r) => setTimeout(r, 2000));
+      for (let i = 0; i < 15; i++) {
+        try {
+          await reconnect();
+          const who = await this.adbRun(['-s', serial, 'shell', 'id -u'], { timeoutMs: 20_000 });
+          if (String(who.stdout).trim() === '0') return 'root';
+          break;
+        } catch {
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
+    }
+    const su = await this.adbRun(['-s', serial, 'shell', 'su -c id -u'], { timeoutMs: 20_000 });
+    if (String(su.stdout).trim() === '0') return 'su';
+    return 'shell';
+  }
+
+  /** How commands reach root on this VM (set at connect). */
+  privilegeOf(vm: Vm): Privilege {
+    return this.privilege.get(vm.uuid) ?? 'shell';
+  }
+
+  /** Wrap a guest command so it runs as root when the image needs `su`. */
+  private asRoot(vm: Vm, script: string): string {
+    return this.privilegeOf(vm) === 'su' ? `su -c ${shq(script)}` : script;
+  }
+
+  /** adb text call for one VM (always with -s; errors carry adb's message). */
+  private async adb(vm: Vm, args: string[], timeoutMs = 120_000): Promise<string> {
     const serial = await this.ensureConnected(vm);
-    try {
-      const { stdout } = await execFileP('adb', ['-s', serial, ...args], { maxBuffer: 64 * 1024 * 1024 });
-      return stdout;
-    } catch (e) {
+    const res = await this.adbRun(['-s', serial, ...args], { timeoutMs });
+    if (res.exitCode !== 0) {
       throw vmError(
         'INTERNAL',
-        `android adapter: adb ${args[0] ?? ''} failed (${e instanceof Error ? e.message : String(e)})`,
+        `android adapter: adb ${args[0] ?? ''} failed: ${(res.stderr || String(res.stdout)).trim().slice(-400)}`,
         'Retry; ADB-over-network can be slow on first call.',
       );
     }
+    return String(res.stdout);
   }
 
-  /** Binary adb exec-out (screencap) with the VM's serial. */
-  private async adbOut(vm: Vm, args: string[]): Promise<Buffer> {
+  /** Binary adb exec-out (screencap, file reads). */
+  private async adbOut(vm: Vm, args: string[], timeoutMs = 120_000): Promise<Buffer> {
     const serial = await this.ensureConnected(vm);
-    const { stdout } = await execFileP('adb', ['-s', serial, 'exec-out', ...args], { encoding: 'buffer' as const, maxBuffer: 64 * 1024 * 1024 });
-    return stdout;
+    const res = await this.adbRun(['-s', serial, 'exec-out', ...args], { buffer: true, timeoutMs });
+    if (res.exitCode !== 0) {
+      throw vmError('INTERNAL', `android adapter: adb exec-out ${args[0] ?? ''} failed: ${res.stderr.trim().slice(-400)}`);
+    }
+    return (res.stdout as Buffer) ?? Buffer.alloc(0);
   }
 
   async screenshot(vm: Vm): Promise<ScreenshotResult> {
@@ -179,16 +262,21 @@ export class AndroidAdapter implements DesktopAdapter {
    * adbd), bounded output and timeout.
    */
   async exec(vm: Vm, cmd: string, args: string[] = [], opts: ExecOptions = {}): Promise<ExecResult> {
+    const t0 = Date.now();
     const serial = await this.ensureConnected(vm);
     const full = [cmd, ...args.map(shq)].join(' ');
     const script = opts.cwd ? `cd ${shq(opts.cwd)} && ${full}` : full;
-    const res = await runBounded('adb', ['-s', serial, 'shell', `${script}; echo "__vmhub_rc=$?"`], {
+    const res = await this.adbRun(['-s', serial, 'shell', `${this.asRoot(vm, script)}; echo "__vmhub_rc=$?"`], {
       timeoutMs: opts.timeoutMs ?? 120_000,
-      stdin: opts.stdin,
-      outputCap: opts.outputCap ?? 200_000,
     });
-    const m = /__vmhub_rc=(\d+)\s*$/.exec(res.stdout);
-    return { ...res, exitCode: m ? Number(m[1]) : res.exitCode, stdout: m ? res.stdout.slice(0, m.index) : res.stdout };
+    const stdout = String(res.stdout);
+    const m = /__vmhub_rc=(\d+)\s*$/.exec(stdout);
+    return {
+      exitCode: m ? Number(m[1]) : res.exitCode,
+      stdout: m ? stdout.slice(0, m.index) : stdout,
+      stderr: res.stderr,
+      durationMs: Date.now() - t0,
+    };
   }
 
   async putFile(vm: Vm, localPath: string, remotePath: string): Promise<void> {
