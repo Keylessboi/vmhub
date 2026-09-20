@@ -444,6 +444,16 @@ export class RealProxmox implements ProxmoxClient {
         }
       }
       await this.request("DELETE", `/nodes/${node}/qemu/${vmid}?purge=1&destroy-unreferenced-disks=1`);
+      // The delete is a task: confirm the VM is gone rather than assuming.
+      for (let i = 0; i < 60; i++) {
+        try {
+          await this.statusVm(vmid);
+        } catch {
+          return; // no longer there
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      throw vmError("INTERNAL", `VM ${vmid} still exists after destroy`, true, "retry-with-backoff");
     } catch (e) {
       // Idempotent: a missing VM is a successful destroy.
       if (isVmError(e) && e.code === "NOT_FOUND") return;

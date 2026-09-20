@@ -785,8 +785,12 @@ async function renewLease(req: Request, ctx: ResolvedDeps, id: string): Promise<
 async function releaseLease(req: Request, ctx: ResolvedDeps, id: string): Promise<Response> {
   const lease = ctx.db.getLease(id);
   if (!lease) throw notFound(`lease '${id}' not found`);
-  if (lease.status === "released") {
-    // Idempotent release — a retry after success returns the same answer.
+  const already = lease.status === "released";
+  // A retry is idempotent, but only once the VM is really gone: a first
+  // release whose destroy failed (Proxmox lock, a VM mid-rollback) used to
+  // leave the VM running forever while every later call answered
+  // "released". If a VM row survives, tear it down before agreeing.
+  if (already && !ctx.db.getVm(lease.vmId)) {
     return json({ vmId: id, status: "released" });
   }
 

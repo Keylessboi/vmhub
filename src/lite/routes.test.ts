@@ -1042,3 +1042,35 @@ describe("lab controls: snapshots + network policy", () => {
     expect((await call(h, "GET", "/v1/vms/nope/network")).status).toBe(404);
   });
 });
+
+describe("release is only idempotent once the VM is gone", () => {
+  test("a retry after a failed destroy tears the VM down instead of answering released", async () => {
+    const c = makeCtx();
+    const h = handler(c);
+    const { json: lease } = await createLease(h, "rel-1");
+    const id = lease.vm.uuid;
+
+    // First release: Proxmox refuses (a lock, a VM mid-rollback).
+    const destroy = c.proxmox.destroyVm.bind(c.proxmox);
+    let fail = true;
+    let destroyed = 0;
+    c.proxmox.destroyVm = async (vmid: number) => {
+      if (fail) throw new Error("can't lock file '/var/lock/qemu-server/lock-2000.conf' - got timeout");
+      destroyed++;
+      return destroy(vmid);
+    };
+    expect((await call(h, "DELETE", `/v1/leases/${id}`)).status).toBeGreaterThanOrEqual(500);
+    expect(c.db.getVm(id)).not.toBeNull();
+
+    // The retry must destroy it, not shrug and report success.
+    fail = false;
+    const retry = await call(h, "DELETE", `/v1/leases/${id}`);
+    expect(retry.status).toBe(200);
+    expect(destroyed).toBe(1);
+    expect(c.db.getVm(id)).toBeNull();
+
+    // Now that nothing is left, further retries are plain idempotent.
+    expect((await call(h, "DELETE", `/v1/leases/${id}`)).json).toEqual({ vmId: id, status: "released" });
+    expect(destroyed).toBe(1);
+  });
+});
