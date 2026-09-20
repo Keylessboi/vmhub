@@ -136,6 +136,7 @@ export class AndroidAdapter implements DesktopAdapter {
       await connect();
       this.serials.set(vm.uuid, serial);
       this.privilege.set(vm.uuid, await this.escalate(serial, connect));
+      await this.waitForFramework(serial);
       return serial;
     } catch (e) {
       this.serials.delete(vm.uuid);
@@ -145,6 +146,23 @@ export class AndroidAdapter implements DesktopAdapter {
         'Ensure the Android golden has ADB-over-network enabled (:5555) and adb is available (locally or on VMHUB_JUMP_HOST).',
       );
     }
+  }
+
+  /**
+   * adbd answers before Android is finished booting, and until then the
+   * framework services are missing: launching an app gets "Unable to connect
+   * to activity manager" and input gets "Can't find service: input". Wait for
+   * sys.boot_completed once, when the connection is made.
+   */
+  private async waitForFramework(serial: string): Promise<void> {
+    const deadline = Date.now() + Number(process.env.VMHUB_ANDROID_BOOT_WAIT_MS ?? 300_000);
+    while (Date.now() < deadline) {
+      const res = await this.adbRun(['-s', serial, 'shell', 'getprop sys.boot_completed'], { timeoutMs: 20_000 });
+      if (String(res.stdout).trim() === '1') return;
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    // Not fatal: exec and file transfer work without the framework.
+    console.error(`[android] ${serial}: sys.boot_completed never became 1; UI calls may fail until it does`);
   }
 
   /** `adb root`, then `su` — whichever the image allows. */
@@ -361,10 +379,18 @@ export class AndroidAdapter implements DesktopAdapter {
       case 'launch':
       case 'focus': {
         if (!target) throw vmError('INVALID_REQUEST', `android ${verb}: package (or package/activity) required`);
-        const out = target.includes('/')
-          ? await this.adb(vm, ['shell', 'am', 'start', '-n', target])
-          : await this.adb(vm, ['shell', 'monkey', '-p', target, '-c', 'android.intent.category.LAUNCHER', '1']);
-        if (/Error|Exception|No activities found/i.test(out)) {
+        // Right after boot the activity manager is not up yet ("Unable to
+        // connect to activity manager"). That is a wait, not a failure.
+        const deadline = Date.now() + Number(process.env.VMHUB_ANDROID_AM_WAIT_MS ?? 120_000);
+        let out = '';
+        for (;;) {
+          out = target.includes('/')
+            ? await this.adb(vm, ['shell', 'am', 'start', '-n', target])
+            : await this.adb(vm, ['shell', 'monkey', '-p', target, '-c', 'android.intent.category.LAUNCHER', '1']);
+          if (!/Unable to connect to activity manager|system is not running/i.test(out) || Date.now() > deadline) break;
+          await new Promise((r) => setTimeout(r, 5000));
+        }
+        if (/Error|Exception|No activities found|Unable to connect/i.test(out)) {
           throw vmError('NOT_FOUND', `android ${verb}: ${target} did not start: ${out.trim().slice(-300)}`, 'List packages with vm_exec "pm list packages".');
         }
         return { started: target, detail: out.trim().slice(0, 300) };
