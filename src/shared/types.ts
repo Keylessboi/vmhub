@@ -39,7 +39,7 @@ export type SemanticCapability =
   | "none";
 
 /** File transport an adapter can use. */
-export type FileCapability = "scp" | "sftp" | "adb" | "docker-cp" | "none";
+export type FileCapability = "scp" | "sftp" | "adb" | "docker-cp" | "powershell" | "none";
 
 /** The full capability declaration for one adapter. */
 export interface Capability {
@@ -195,6 +195,8 @@ export interface Vm {
   ip?: string;
   /** Host-side lease-scratch dir for artifacts. */
   scratchDir?: string;
+  /** Proxmox VMID on its node (host-side capture needs it; never an identity). */
+  vmid?: number;
   createdAt: number;
   /** Number of in-progress MCP tool calls on this VM (drain protection). */
   activeToolCalls?: number;
@@ -413,6 +415,50 @@ export interface ExecResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /** The command was killed at its timeout. */
+  timedOut?: boolean;
+  /** stdout or stderr was cut to its tail. */
+  truncated?: boolean;
+  durationMs?: number;
+}
+
+/**
+ * Lease network policy, enforced by the Proxmox per-VM firewall.
+ * - internet: outbound internet only — RFC1918, CGNAT/tailnet and link-local
+ *   destinations (the LAN, other leases, the tailnet) are dropped.
+ * - isolated: no outbound traffic at all (DNS included). The host keeps its
+ *   inbound control path (SSH/MCP) in both modes.
+ */
+export type NetworkMode = "internet" | "isolated";
+
+export interface NetworkPolicy {
+  mode: NetworkMode | "unmanaged";
+  /** False when the datacenter firewall is off — rules exist but nothing enforces them. */
+  enforced: boolean;
+  reason?: string;
+}
+
+export interface VmSnapshot {
+  name: string;
+  description?: string;
+  /** Unix ms. */
+  createdAt?: number;
+  /** RAM state included — a revert resumes the running system exactly. */
+  withMemory: boolean;
+  parent?: string;
+}
+
+export interface ExecOptions {
+  /** Hard timeout; the command is killed when it expires. */
+  timeoutMs?: number;
+  /** Working directory inside the VM. */
+  cwd?: string;
+  /** Bytes fed to the command's stdin. */
+  stdin?: string;
+  /** Start in the background (nohup) and return the pid + log path at once. */
+  detach?: boolean;
+  /** Per-stream character cap on returned output (the tail is kept). */
+  outputCap?: number;
 }
 
 /**
@@ -431,7 +477,7 @@ export interface DesktopAdapter {
   input(vm: Vm, action: InputAction): Promise<void>;
   listWindows(vm: Vm): Promise<WindowInfo[]>;
   inspect(vm: Vm): Promise<SemanticElement>;
-  exec(vm: Vm, cmd: string, args?: string[]): Promise<ExecResult>;
+  exec(vm: Vm, cmd: string, args?: string[], opts?: ExecOptions): Promise<ExecResult>;
   /** File transfer. One or more may be unsupported per adapter. */
   putFile?(vm: Vm, localPath: string, remotePath: string): Promise<void>;
   getFile?(vm: Vm, remotePath: string, localPath: string): Promise<void>;

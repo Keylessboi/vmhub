@@ -62,6 +62,9 @@ export function startLiteServer(config: LiteServerConfig = {}): ReturnType<typeo
   return serve({
     hostname,
     port,
+    // Bun closes a connection idle for 10s by default — shorter than a VM
+    // destroy, a snapshot with RAM or a rollback. 255s is Bun's maximum.
+    idleTimeout: 255,
     fetch: (req) => handler(req),
   });
 }

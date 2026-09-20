@@ -5,7 +5,7 @@
  * Live-server behavior is exercised e2e against the golden, not here.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { CURSORTOUCH_PORT, WindowsAdapter, textContent, pngDimensions } from '../windows/index.ts';
+import { CURSORTOUCH_PORT, WindowsAdapter, parseSnapshotWindows, decodeSnapshotText, textContent, pngDimensions, SHELL_TOOL_PATTERN, psq, wrapPowerShell, parseShellReply } from '../windows/index.ts';
 import type { Vm } from '../../src/shared/types.ts';
 
 const adapter = new WindowsAdapter();
@@ -30,10 +30,10 @@ describe('WindowsAdapter capability declaration', () => {
     expect(adapter.capability.windowing).toEqual(['windows']);
   });
 
-  it('declares input + no exec (exec goes through PowerShell tool)', () => {
+  it('declares input + exec and file transfer through the PowerShell tool', () => {
     expect(adapter.capability.input).toEqual(['click', 'type', 'key', 'paste', 'drag']);
-    expect(adapter.capability.exec).toBe(false);
-    expect(adapter.capability.files).toEqual([]);
+    expect(adapter.capability.exec).toBe(true);
+    expect(adapter.capability.files).toEqual(['powershell']);
   });
 
   it('notes the transport in the capability', () => {
@@ -49,8 +49,38 @@ describe('WindowsAdapter availableTools', () => {
     }
   });
 
-  it('does not advertise exec (not served)', () => {
-    expect(adapter.availableTools()).not.toContain('exec');
+  it('advertises exec and file transfer, not clone_repo', () => {
+    for (const t of ['exec', 'put_file', 'get_file']) expect(adapter.availableTools()).toContain(t);
+    expect(adapter.availableTools()).not.toContain('clone_repo');
+  });
+});
+
+describe('PowerShell exec plumbing', () => {
+  it('treats CursorTouch\'s timeout prose as a timeout', async () => {
+    const a = new WindowsAdapter();
+    (a as unknown as { ps: unknown }).ps = async () => ({ exitCode: 1, output: 'Command execution timed out' });
+    const res = await a.exec({ uuid: 'u', ip: '10.10.10.5', status: 'ready' } as never, 'Start-Sleep 60');
+    expect(res.timedOut).toBe(true);
+  });
+
+  it('finds the shell tool under every CursorTouch name', () => {
+    for (const n of ['Shell', 'Powershell', 'PowerShell', 'Powershell-Tool']) expect(SHELL_TOOL_PATTERN.test(n)).toBe(true);
+    for (const n of ['App', 'Screenshot', 'Shortcut']) expect(SHELL_TOOL_PATTERN.test(n)).toBe(false);
+  });
+
+  it('quotes PowerShell literals', () => {
+    expect(psq("C:\\it's")).toBe("'C:\\it''s'");
+  });
+
+  it('wraps a command so the exit code survives', () => {
+    const w = wrapPowerShell('Get-Process', 'C:\\tmp');
+    expect(w).toContain("Set-Location -LiteralPath 'C:\\tmp'");
+    expect(w).toContain('"__vmhub_rc=$LASTEXITCODE"');
+  });
+
+  it('parses the sentinel exit code out of the reply', () => {
+    expect(parseShellReply('Response: hello\nworld\n__vmhub_rc=3\nStatus Code: 0')).toEqual({ exitCode: 3, output: 'hello\nworld' });
+    expect(parseShellReply('Response: plain\nStatus Code: 1')).toEqual({ exitCode: 1, output: 'plain' });
   });
 });
 
@@ -153,5 +183,60 @@ describe('VM existence check', () => {
     await expect(
       adapter.screenshot({ ...vm, status: 'destroyed', ip: undefined }),
     ).rejects.toThrow(/does not exist on Proxmox/);
+  });
+});
+
+describe('parseSnapshotWindows', () => {
+  // Shape taken from a live CursorTouch Snapshot.
+  const snapshot = [
+    '    Cursor Position: (0, 0)',
+    'Visible Displays: 0:\\\\.\\DISPLAY1 (0,0,1280,800) primary',
+    '',
+    '    Focused Window:',
+    '    Name                           Depth  Status      Width    Height    Handle',
+    '---------------------------  -------  --------  -------  --------  --------',
+    'C:\\WINDOWS\\SYSTEM32\\cmd.exe        3  Normal       1129       635     65900',
+    '',
+    '    Opened Windows:',
+    '    Name                 Depth  Status   Width  Height  Handle',
+    '-------------------  -------  -------  -----  ------  ------',
+    'Untitled - Notepad         2  Normal     800     600   12345',
+    '',
+    '    UI Tree:',
+    '    desktop',
+    '    ├── window "C:\\WINDOWS\\SYSTEM32\\cmd.exe"',
+    '    ├── window ""',
+    '    ├── window "Internal Console Management Window"',
+  ].join('\n');
+
+  it('reads the focused and opened window tables', () => {
+    const w = parseSnapshotWindows(snapshot);
+    const cmd = w.find((x) => x.title.endsWith('cmd.exe'))!;
+    expect(cmd.focused).toBe(true);
+    expect([cmd.width, cmd.height]).toEqual([1129, 635]);
+    const notepad = w.find((x) => x.title === 'Untitled - Notepad')!;
+    expect(notepad).toMatchObject({ id: '12345', width: 800, height: 600, focused: false });
+  });
+
+  it('adds UI-tree windows, skips empty titles, and de-duplicates', () => {
+    const titles = parseSnapshotWindows(snapshot).map((w) => w.title);
+    expect(titles).toContain('Internal Console Management Window');
+    expect(titles.filter((t) => t.endsWith('cmd.exe'))).toHaveLength(1);
+    expect(titles).not.toContain('');
+  });
+
+  it('filters by substring', () => {
+    expect(parseSnapshotWindows(snapshot, 'notepad').map((w) => w.title)).toEqual(['Untitled - Notepad']);
+  });
+
+  it('decodes the JSON-encoded report CursorTouch actually returns', () => {
+    const wire = JSON.stringify([snapshot]);
+    expect(decodeSnapshotText(wire)).toBe(snapshot);
+    expect(parseSnapshotWindows(wire).map((w) => w.title)).toContain('Untitled - Notepad');
+    expect(decodeSnapshotText('plain text')).toBe('plain text');
+  });
+
+  it('survives a snapshot with no windows', () => {
+    expect(parseSnapshotWindows('Opened Windows:\n    No windows found\n')).toEqual([]);
   });
 });

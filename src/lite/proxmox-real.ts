@@ -12,12 +12,12 @@
  * only trustworthy identity; numeric VMIDs are internal. Linked clones carry
  * the tag; listVms filters to tagged VMs.
  */
-import type { Template, VmError } from "../shared/types.ts";
+import type { NetworkMode, NetworkPolicy, Template, VmError, VmSnapshot } from "../shared/types.ts";
 import { describeError } from "../shared/types.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
 import type { CreateProxmoxVmInput, ProxmoxClient, ProxmoxVm, ProxmoxVmStatus } from "./proxmox.ts";
 import { isVmError } from "../mcp/errors.ts";
-import { execFileSync } from "node:child_process";
+import { connect as netConnect } from "node:net";
 
 export interface RealProxmoxOptions {
   host: string;
@@ -118,7 +118,9 @@ export function osFromTemplateName(name: string | undefined): Template["os"] {
   const n = (name ?? "").toLowerCase();
   if (n.startsWith("hyprland")) return "hyprland";
   if (n.startsWith("windows") || n.startsWith("win")) return "windows";
-  if (n.startsWith("android")) return "android";
+  // Android goldens are named for their distro as often as the OS
+  // ("bliss-android16"), so match anywhere in the name.
+  if (n.includes("android") || n.startsWith("bliss")) return "android";
   if (n.startsWith("x11") || n.startsWith("ubuntu-x11")) return "x11";
   return "headless";
 }
@@ -129,7 +131,18 @@ export function osFromTemplateName(name: string | undefined): Template["os"] {
  */
 function templateCapabilities(os: Template["os"]): Template["capabilities"] {
   if (os === "headless") return ["exec"];
-  return ["screenshot", "inspect", "list_windows", "click", "type", "key", "drag", "exec"];
+  const desktop: Template["capabilities"] = ["screenshot", "inspect", "list_windows", "click", "type", "key", "drag", "exec"];
+  // adb moves files as itself; the other goldens go through scp/PowerShell.
+  return os === "android" ? [...desktop, "put_file", "get_file"] : desktop;
+}
+
+/**
+ * Android goldens carry their address in the image (no cloud-init, and DHCP
+ * is unanswered on the guest bridge), so every clone comes up on the same
+ * one — which is also why only one Android lease can exist at a time.
+ */
+export function androidIp(env: NodeJS.ProcessEnv = process.env): string {
+  return env.VMHUB_ANDROID_IP ?? "10.10.10.100";
 }
 
 export class RealProxmox implements ProxmoxClient {
@@ -262,10 +275,27 @@ export class RealProxmox implements ProxmoxClient {
     // (reaper matches vmhub-* tags, never VMIDs). Set it right after cloning,
     // before the VM can be observed as tag-less by any sweep.
     // A static IP is set the same way: deterministic transport, no DHCP race.
+    const os = osFromTemplateName((await this.listTemplates()).find((t) => t.id === input.templateId)?.notes?.replace(/^Golden template /, ""));
+    if (os === "android") {
+      // No cloud-init drive and no DHCP: the image configures itself.
+      await this.request("POST", `/nodes/${node}/qemu/${vmid}/config`, { tags: input.proxmoxTag });
+      const cfg = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string };
+      return this.toVm({ vmid, name: input.name, status: "provisioning" }, this.parseTags(cfg), node, androidIp());
+    }
     const vmIp = this.pool.allocate();
     await this.request("POST", `/nodes/${node}/qemu/${vmid}/config`, {
       tags: input.proxmoxTag,
       ipconfig0: `ip=${vmIp}/${this.pool.config.subnet.split("/")[1] ?? "24"},gw=${this.pool.config.gateway}`,
+      // Without an explicit nameserver, Proxmox hands the guest the HOST's
+      // resolv.conf — here Tailscale MagicDNS (100.100.100.100) and the
+      // tailnet search domain. Lease VMs get public resolvers instead.
+      nameserver: guestDns(),
+      searchdomain: "vmhub.invalid",
+      // Proxmox defaults ciupgrade=1: every clone runs a full dist-upgrade on
+      // first boot, which replaced xserver-xorg-core under the running x11
+      // session (no display until the next boot), slows every lease and
+      // makes runs non-reproducible. Leases boot exactly what the golden has.
+      ciupgrade: process.env.VMHUB_GUEST_UPGRADE === "1" ? 1 : 0,
     });
     const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string };
     const tags = this.parseTags(config);
@@ -281,62 +311,76 @@ export class RealProxmox implements ProxmoxClient {
     return this.getVm(vmid);
   }
 
-  async probeCapabilities(vmid: number): Promise<{ available: boolean; reason?: string }> {
-    const vm = await this.getVm(vmid);
-    if (!vm.ip) {
-      return { available: false, reason: "VM has no IP address assigned" };
-    }
+  /**
+   * Boot readiness, judged from the host side (lite runs on the Proxmox host,
+   * which routes the guest network):
+   *  1. the VM is running;
+   *  2. when the template enables the QEMU guest agent, it answers ping;
+   *  3. Windows goldens carry a baked-in static IP, so the lease's address
+   *     (ipconfig0) is applied through the guest agent;
+   *  4. the guest's control port answers — sshd (22) on Linux, CursorTouch
+   *     (8000) on Windows — so "ready" means an agent's first call works.
+   * A guest that misses a step is still handed out with a reason (the
+   * adapters retry) rather than destroyed.
+   */
+  async probeCapabilities(vmid: number, os?: Template["os"]): Promise<{ available: boolean; reason?: string }> {
+    const node = await this.node();
+    const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { agent?: string; ostype?: string; ipconfig0?: string; name?: string };
+    if ((await this.status(vmid)) !== "running") return { available: false, reason: `VM ${vmid} is not running` };
+    const windows = os ? os === "windows" : /^win/.test(config.ostype ?? "");
+    // A clone is named for the template's VMID ("2110-abc"), so its own name
+    // never says "android" — the lease's template does.
+    const android = os ? os === "android" : osFromTemplateName(config.name) === "android";
+    const budget = Number(windows || android ? process.env.VMHUB_BOOT_WAIT_WINDOWS_MS ?? 45 * 60_000 : process.env.VMHUB_BOOT_WAIT_MS ?? 180_000);
+    const deadline = Date.now() + budget;
+    const ip = android ? androidIp() : ipFromConfig(config.ipconfig0);
 
-    const sshKey = process.env.VMHUB_SSH_KEY || `${process.env.HOME}/.ssh/vmhub_rsa`;
-    const sshUser = process.env.VMHUB_SSH_USER || "vmhub";
-
-    const requiredBinaries: Record<string, string[]> = {
-      hyprland: ["hyprctl", "grim", "slurp", "wtype", "wl-copy", "wl-paste", "ffmpeg"],
-      x11: ["xdotool", "scrot", "ffmpeg"],
-      windows: [],
-      headless: ["ffmpeg"],
-    };
-
-    const os = osFromTemplateName(vm.name);
-    const bins = requiredBinaries[os] ?? [];
-    if (bins.length === 0) return { available: true };
-
-    const checkCmd = bins.map((b) => `which ${b} >/dev/null 2>&1`).join(" && ");
-    try {
-      execFileSync("ssh", [
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "ConnectTimeout=5",
-        "-o", "BatchMode=yes",
-        "-i", sshKey,
-        `${sshUser}@${vm.ip}`,
-        checkCmd,
-      ], { timeout: 10_000, encoding: "utf8" });
-      return { available: true };
-    } catch (err) {
-      const missing = bins.filter((b) => {
+    if (config.agent && /^(1|enabled=1)/.test(String(config.agent))) {
+      let up = false;
+      while (!up && Date.now() < deadline) {
         try {
-          execFileSync("ssh", [
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "ConnectTimeout=5",
-            "-o", "BatchMode=yes",
-            "-i", sshKey,
-            `${sshUser}@${vm.ip}`,
-            `which ${b} >/dev/null 2>&1`,
-          ], { timeout: 10_000, encoding: "utf8" });
-          return false;
+          await this.request("POST", `/nodes/${node}/qemu/${vmid}/agent/ping`, {});
+          up = true;
         } catch {
-          return true;
+          await new Promise((r) => setTimeout(r, 5000));
         }
-      });
-      return { available: false, reason: `missing: ${missing.join(", ")}` };
+      }
+      if (!up) return { available: true, reason: "guest agent did not answer; the guest may still be booting" };
+      if (windows && ip) {
+        const gw = this.pool.config.gateway;
+        const res = await this.agentExec(vmid, ["powershell", "-NoProfile", "-EncodedCommand", encodePs(windowsIpScript(ip, gw, guestDns()))], 120_000);
+        if (res.exitcode !== 0) return { available: true, reason: `could not set the lease IP in Windows: ${res.err.slice(-300)}` };
+      }
     }
+    if (!ip || process.env.VMHUB_READY_PORT_CHECK === "0") return { available: true };
+    const port = android ? Number(process.env.ADB_PORT ?? 5555) : windows ? Number(process.env.CURSORTOUCH_PORT ?? 8000) : 22;
+    while (Date.now() < deadline) {
+      if (await tcpOpen(ip, port)) return { available: true };
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    return { available: true, reason: `${ip}:${port} did not answer within ${Math.round(budget / 1000)}s` };
+  }
+
+  /** Run a command through the QEMU guest agent and wait for it (exit code + output). */
+  private async agentExec(vmid: number, command: string[], timeoutMs: number): Promise<{ exitcode: number; out: string; err: string }> {
+    const node = await this.node();
+    const { pid } = (await this.request("POST", `/nodes/${node}/qemu/${vmid}/agent/exec`, { command })) as { pid: number };
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const st = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/agent/exec-status?pid=${pid}`)) as {
+        exited?: number; exitcode?: number; "out-data"?: string; "err-data"?: string;
+      };
+      if (st.exited) return { exitcode: Number(st.exitcode ?? 1), out: st["out-data"] ?? "", err: st["err-data"] ?? "" };
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    return { exitcode: 124, out: "", err: `guest command still running after ${timeoutMs}ms` };
   }
 
   async getVm(vmid: number): Promise<ProxmoxVm> {
     const node = await this.node();
     const vm = await this.statusVm(vmid);
-    const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string };
-    return this.toVm({ ...vm, vmid }, this.parseTags(config), node);
+    const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string; ipconfig0?: string };
+    return this.toVm({ ...vm, vmid }, this.parseTags(config), node, ipFromConfig(config.ipconfig0));
   }
 
   async listVms(): Promise<ProxmoxVm[]> {
@@ -382,13 +426,36 @@ export class RealProxmox implements ProxmoxClient {
     try {
       if ((await this.status(vmid)) === "running") {
         // Proxmox refuses to delete a running VM — stop it first, then delete.
-        await this.request("POST", `/nodes/${node}/qemu/${vmid}/status/stop`, {});
-        for (let i = 0; i < 30; i++) {
+        // stop is an async task: wait for it (a VM just rolled back or holding
+        // a snapshot lock can take well over 30s), then confirm the state.
+        // A VM just rolled back / snapshotted can still hold its config lock
+        // ("can't lock file … got timeout"): retry the stop a few times.
+        for (let attempt = 1; ; attempt++) {
+          try {
+            const upid = await this.request("POST", `/nodes/${node}/qemu/${vmid}/status/stop`, { timeout: 60 });
+            await this.waitTask(upid, 120_000);
+            break;
+          } catch (e) {
+            if (attempt >= 3 || !/lock/i.test(describeError(e))) throw e;
+            await new Promise((r) => setTimeout(r, 5000 * attempt));
+          }
+        }
+        for (let i = 0; i < 60; i++) {
           if ((await this.status(vmid)) !== "running") break;
           await new Promise((r) => setTimeout(r, 1000));
         }
       }
       await this.request("DELETE", `/nodes/${node}/qemu/${vmid}?purge=1&destroy-unreferenced-disks=1`);
+      // The delete is a task: confirm the VM is gone rather than assuming.
+      for (let i = 0; i < 60; i++) {
+        try {
+          await this.statusVm(vmid);
+        } catch {
+          return; // no longer there
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      throw vmError("INTERNAL", `VM ${vmid} still exists after destroy`, true, "retry-with-backoff");
     } catch (e) {
       // Idempotent: a missing VM is a successful destroy.
       if (isVmError(e) && e.code === "NOT_FOUND") return;
@@ -406,6 +473,139 @@ export class RealProxmox implements ProxmoxClient {
     const node = await this.node();
     const st = (await this.request("GET", `/nodes/${node}/storage/${await this.storageName()}/status`)) as { used?: number };
     return Number(st.used ?? 0);
+  }
+
+  /**
+   * Wait for an async Proxmox task (UPID) to finish; throw on failure.
+   * Snapshot/rollback return a UPID immediately and run in the background.
+   */
+  private async waitTask(upid: unknown, timeoutMs = 600_000): Promise<void> {
+    if (typeof upid !== "string" || !upid.startsWith("UPID:")) return;
+    const node = upid.split(":")[1] ?? (await this.node());
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const st = (await this.request("GET", `/nodes/${node}/tasks/${encodeURIComponent(upid)}/status`)) as { status?: string; exitstatus?: string };
+      if (st.status === "stopped") {
+        if (st.exitstatus && st.exitstatus !== "OK" && !st.exitstatus.startsWith("WARNINGS")) {
+          throw vmError("INTERNAL", `proxmox task failed: ${st.exitstatus}`, false, "no-retry");
+        }
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    throw vmError("BOOT_TIMEOUT", `proxmox task ${upid} still running after ${timeoutMs}ms`, true, "retry-with-backoff");
+  }
+
+  async listSnapshots(vmid: number): Promise<VmSnapshot[]> {
+    const node = await this.node();
+    const rows = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/snapshot`)) as {
+      name: string; description?: string; snaptime?: number; vmstate?: number; parent?: string;
+    }[];
+    return (rows ?? [])
+      .filter((r) => r.name !== "current")
+      .map((r) => ({
+        name: r.name,
+        description: r.description?.trim() || undefined,
+        createdAt: r.snaptime ? r.snaptime * 1000 : undefined,
+        withMemory: Number(r.vmstate) === 1,
+        parent: r.parent,
+      }))
+      .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+  }
+
+  async createSnapshot(vmid: number, name: string, opts: { description?: string; withMemory?: boolean } = {}): Promise<void> {
+    const node = await this.node();
+    const upid = await this.request("POST", `/nodes/${node}/qemu/${vmid}/snapshot`, {
+      snapname: name,
+      description: opts.description ?? "vmhub snapshot",
+      vmstate: opts.withMemory ? 1 : 0,
+    });
+    await this.waitTask(upid);
+  }
+
+  async rollbackSnapshot(vmid: number, name: string): Promise<void> {
+    const node = await this.node();
+    const upid = await this.request("POST", `/nodes/${node}/qemu/${vmid}/snapshot/${encodeURIComponent(name)}/rollback`, { start: 1 });
+    await this.waitTask(upid);
+    // Disk-only snapshots roll back to a stopped VM on older PVE; make sure it runs.
+    if ((await this.status(vmid)) !== "running") await this.startVm(vmid);
+  }
+
+  async deleteSnapshot(vmid: number, name: string): Promise<void> {
+    const node = await this.node();
+    const upid = await this.request("DELETE", `/nodes/${node}/qemu/${vmid}/snapshot/${encodeURIComponent(name)}`);
+    await this.waitTask(upid);
+  }
+
+  /** Datacenter firewall state: VM rules are inert unless it is enabled. */
+  private async datacenterFirewall(): Promise<{ enabled: boolean; reason?: string }> {
+    try {
+      const o = (await this.request("GET", `/cluster/firewall/options`)) as { enable?: number };
+      return Number(o?.enable) === 1 ? { enabled: true } : { enabled: false, reason: "datacenter firewall is disabled (Datacenter → Firewall → Options → Firewall: Yes)" };
+    } catch (e) {
+      return { enabled: false, reason: `cannot read datacenter firewall options: ${describeError(e)}` };
+    }
+  }
+
+  async getNetworkPolicy(vmid: number): Promise<NetworkPolicy> {
+    const node = await this.node();
+    const opts = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/firewall/options`)) as { enable?: number };
+    const rules = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/firewall/rules`)) as { comment?: string }[];
+    const tag = rules.map((r) => r.comment ?? "").find((c) => c.startsWith("vmhub:mode="));
+    if (!tag || Number(opts?.enable) !== 1) return { mode: "unmanaged", enforced: false, reason: "no vmhub policy applied to this VM" };
+    const mode = tag.slice("vmhub:mode=".length).split(" ")[0] as NetworkMode;
+    const dc = await this.datacenterFirewall();
+    return { mode, enforced: dc.enabled, reason: dc.reason };
+  }
+
+  async setNetworkPolicy(vmid: number, mode: NetworkMode, gw?: string): Promise<NetworkPolicy> {
+    const node = await this.node();
+    const gateway = gw ?? this.pool.config.gateway;
+    const base = `/nodes/${node}/qemu/${vmid}`;
+    // 1. The NIC must opt into the firewall bridge.
+    const config = (await this.request("GET", `${base}/config`)) as Record<string, string>;
+    const net0 = config.net0 ?? "";
+    if (!/(^|,)firewall=1(,|$)/.test(net0)) {
+      if (!net0) throw vmError("INTERNAL", `VM ${vmid} has no net0 to firewall`, false, "no-retry");
+      await this.request("POST", `${base}/config`, { net0: `${net0.replace(/(^|,)firewall=\d/, "")},firewall=1` });
+    }
+    // 2. Replace every vmhub-owned rule (highest position first so indexes stay valid).
+    const rules = (await this.request("GET", `${base}/firewall/rules`)) as { pos: number; comment?: string }[];
+    for (const r of [...rules].filter((r) => (r.comment ?? "").startsWith("vmhub:")).sort((a, b) => b.pos - a.pos)) {
+      await this.request("DELETE", `${base}/firewall/rules/${r.pos}`);
+    }
+    // Rules are inserted at pos 0, so add them in reverse of evaluation order.
+    const wanted: Record<string, unknown>[] = [];
+    wanted.push({ type: "in", action: "ACCEPT", source: gateway, comment: `vmhub:mode=${mode} host control path` });
+    if (mode === "internet") {
+      wanted.push({ type: "out", action: "ACCEPT", dest: gateway, proto: "udp", dport: "53", comment: "vmhub: dns via host" });
+      wanted.push({ type: "out", action: "ACCEPT", dest: gateway, proto: "tcp", dport: "53", comment: "vmhub: dns via host" });
+      for (const cidr of ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"]) {
+        wanted.push({ type: "out", action: "DROP", dest: cidr, comment: `vmhub: no private/tailnet ${cidr}` });
+      }
+    }
+    for (const rule of wanted.reverse()) {
+      await this.request("POST", `${base}/firewall/rules`, { ...rule, enable: 1, pos: 0 });
+    }
+    // 3. Policies: inbound only from the host; outbound per mode.
+    await this.request("PUT", `${base}/firewall/options`, {
+      enable: 1,
+      policy_in: "DROP",
+      policy_out: mode === "internet" ? "ACCEPT" : "DROP",
+      dhcp: 1,
+      ndp: 0,
+      radv: 0,
+    });
+    // pve-firewall compiles rule changes on a ~10s cycle, so a running VM
+    // keeps its old policy until then (measured: internet→isolated still let
+    // traffic out at +0s, blocked at +12s). Do not report a mode before it
+    // is in force. A stopped VM picks the rules up before its NIC exists.
+    const settleMs = Number(process.env.VMHUB_FIREWALL_SETTLE_MS ?? 12_000);
+    if (settleMs > 0 && (await this.status(vmid)) === "running") {
+      await new Promise((r) => setTimeout(r, settleMs));
+    }
+    const dc = await this.datacenterFirewall();
+    return { mode, enforced: dc.enabled, reason: dc.reason };
   }
 
   /**
@@ -477,4 +677,51 @@ export function createRealProxmox(config: RealProxmoxNodeConfig): RealProxmox {
 /** "10.10.10.0/24", 50 → "10.10.10.50" — octet-based config to legacy IP string. */
 function hostIp(subnet: string, octet: number): string {
   return `${subnet.split("/")[0]!.split(".").slice(0, 3).join(".")}.${octet}`;
+}
+
+/** "ip=10.10.10.62/24,gw=10.10.10.1" → "10.10.10.62" (static cloud-init address). */
+export function ipFromConfig(ipconfig?: string): string | undefined {
+  const m = /(?:^|,)ip=(\d+\.\d+\.\d+\.\d+)/.exec(ipconfig ?? "");
+  return m?.[1];
+}
+
+/** Resolvers written into every lease VM's cloud-init (VMHUB_GUEST_DNS, space-separated). */
+export function guestDns(env: NodeJS.ProcessEnv = process.env): string {
+  // Quad9 (9.9.9.9 / 149.112.112.112): the lab's default resolver.
+  return (env.VMHUB_GUEST_DNS ?? "9.9.9.9 149.112.112.112").trim().split(/[\s,]+/).join(" ");
+}
+
+/** Can we open a TCP connection to host:port within 3s? */
+function tcpOpen(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = netConnect({ host, port });
+    const done = (ok: boolean) => { sock.destroy(); resolve(ok); };
+    sock.setTimeout(3000, () => done(false));
+    sock.once("connect", () => done(true));
+    sock.once("error", () => done(false));
+  });
+}
+
+/** PowerShell -EncodedCommand payload (UTF-16LE base64). */
+export function encodePs(script: string): string {
+  return Buffer.from(script, "utf16le").toString("base64");
+}
+
+/**
+ * Give a Windows guest the lease's static address. Windows goldens carry a
+ * baked-in address (cloud-init's ipconfig0 does not reach Windows without
+ * cloudbase-init), so every clone would otherwise come up on the same IP.
+ */
+export function windowsIpScript(ip: string, gateway: string, dns: string): string {
+  const servers = dns.split(/\s+/).filter(Boolean).map((d) => `'${d}'`).join(",");
+  return [
+    "$ErrorActionPreference='Stop'",
+    "$a = Get-NetAdapter | Where-Object Status -eq 'Up' | Sort-Object ifIndex | Select-Object -First 1",
+    `if (-not (Get-NetIPAddress -InterfaceIndex $a.ifIndex -IPAddress '${ip}' -ErrorAction SilentlyContinue)) {`,
+    "  Get-NetIPAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false",
+    "  Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false",
+    `  New-NetIPAddress -InterfaceIndex $a.ifIndex -IPAddress '${ip}' -PrefixLength 24 -DefaultGateway '${gateway}' | Out-Null`,
+    "}",
+    `Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses @(${servers})`,
+  ].join("\n");
 }

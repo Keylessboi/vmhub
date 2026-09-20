@@ -29,6 +29,8 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import type {
   CapabilityId,
   DesktopAdapter,
+  ExecOptions,
+  ExecResult,
   FileCapability,
   InputAction,
   InputCapability,
@@ -41,6 +43,8 @@ import type {
 } from '../../src/shared/types.ts';
 import { CAPABILITIES } from '../../src/shared/types.ts';
 import { vmError } from '../../src/mcp/errors.ts';
+import { sshCloneRepo, sshExec, sshGetFile, sshPutFile } from '../ssh-ops.ts';
+
 import { vmSshMcpTransport } from '../transport.ts';
 
 /** In-VM launcher path installed at golden build (runs computer-use-linux mcp). */
@@ -89,9 +93,9 @@ export class X11Adapter implements DesktopAdapter {
     windowing: ['x11'] as WindowingSystem[],
     input: ['click', 'type', 'key', 'drag'] as InputCapability[],
     semantic: 'uia' as const,
-    files: [] as FileCapability[],
-    exec: false,
-    notes: 'X11 desktop VM via computer-use-linux in-VM MCP (launch-x11-mcp).',
+    files: ['scp'] as FileCapability[],
+    exec: true,
+    notes: 'X11 desktop VM via computer-use-linux in-VM MCP (launch-x11-mcp); SSH for shell and files.',
   };
 
   private conns = new Map<string, X11Connection>();
@@ -107,6 +111,10 @@ export class X11Adapter implements DesktopAdapter {
       CAPABILITIES.drag,
       CAPABILITIES.focus,
       CAPABILITIES.dispatch,
+      CAPABILITIES.exec,
+      CAPABILITIES.putFile,
+      CAPABILITIES.getFile,
+      CAPABILITIES.cloneRepo,
     ];
   }
 
@@ -241,8 +249,21 @@ export class X11Adapter implements DesktopAdapter {
     };
   }
 
-  async exec(_vm: Vm, _cmd: string, _args?: string[]): Promise<never> {
-    throw vmError('CAPABILITY_UNAVAILABLE', 'x11 adapter: no exec path (computer-use-linux has no exec tool)');
+  /** Shell in the VM over the same SSH hop as the MCP transport. */
+  async exec(vm: Vm, cmd: string, args: string[] = [], opts: ExecOptions = {}): Promise<ExecResult> {
+    return sshExec(vm, cmd, args, opts);
+  }
+
+  async putFile(vm: Vm, localPath: string, remotePath: string): Promise<void> {
+    return sshPutFile(vm, localPath, remotePath);
+  }
+
+  async getFile(vm: Vm, remotePath: string, localPath: string): Promise<void> {
+    return sshGetFile(vm, remotePath, localPath);
+  }
+
+  async cloneRepo(vm: Vm, repoUrl: string, destPath: string): Promise<void> {
+    return sshCloneRepo(vm, repoUrl, destPath);
   }
 
   /** Validated escape hatch. focus maps to activate_window; the rest are honest gaps. */

@@ -4,18 +4,21 @@
  * Both the hyprland adapter (launch-hypr-mcp) and the x11 adapter
  * (launch-x11-mcp) drive a per-VM MCP server that lives inside the VM:
  *
- *   ssh -T -o StrictHostKeyChecking=no \
- *       -o ProxyJump=<jump> root@<vm.ip> <in-vm-launcher>
+ *   ssh -T <opts> -o ProxyCommand='ssh <jump-opts> -W %h:%p <jump>' \
+ *       root@<vm.ip> <in-vm-launcher>
  *
  * The Proxmox host key and the VM root key are installed at golden build;
  * `-T` keeps stdio clean for MCP. Env-gated so operators can point at other
- * hosts/users without recompiling: VMHUB_JUMP_HOST (default 192.168.1.220),
- * VMHUB_SSH_USER (default root).
+ * hosts/users without recompiling: VMHUB_JUMP_HOST (default 192.168.1.220;
+ * any ssh alias or user@host), VMHUB_JUMP_USER, VMHUB_SSH_USER (default root),
+ * VMHUB_SSH_KEY (identity file for both hops).
  *
  * Adapters keep their own IN_VM_LAUNCHER constant (the launcher path differs
  * per golden); everything else about the transport is shared.
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { createServer, connect as netConnect } from 'node:net';
+import { homedir } from 'node:os';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import type { Vm } from '../src/shared/types.ts';
 import { vmError } from '../src/mcp/errors.ts';
@@ -25,20 +28,93 @@ export function vmSshUser(env: NodeJS.ProcessEnv = process.env): string {
   return env.VMHUB_SSH_USER ?? 'root';
 }
 
-/** ProxyJump target through the Proxmox host: "root@192.168.1.220" by default. */
+/**
+ * The Proxmox host every VM connection hops through.
+ *
+ * VMHUB_JUMP_HOST may be a bare host/IP, `user@host`, or an ~/.ssh/config
+ * alias. The host is often only reachable over Tailscale (e.g. `vmhub-1`),
+ * so nothing here assumes the LAN. VMHUB_JUMP_USER picks the jump user
+ * (falls back to VMHUB_SSH_USER, then root).
+ */
 export function sshJumpTarget(env: NodeJS.ProcessEnv = process.env): string {
   const host = env.VMHUB_JUMP_HOST ?? '192.168.1.220';
-  return `${vmSshUser(env)}@${host}`;
+  if (host.includes('@')) return host;
+  const user = env.VMHUB_JUMP_USER ?? env.VMHUB_SSH_USER ?? 'root';
+  return `${user}@${host}`;
 }
 
-/** ssh argv for one VM: `-T -o StrictHostKeyChecking=no -o ProxyJump=… root@<ip>`. */
-export function sshIntoVmArgs(vm: Vm, env: NodeJS.ProcessEnv = process.env): string[] {
+/** Options shared by every hop: never prompt, fail fast, notice dead links. */
+function commonOpts(env: NodeJS.ProcessEnv): string[] {
+  // A dedicated ssh_config lets each hop use its own key/route (e.g. reach
+  // the host through a LAN jump, guests with the golden's key).
+  const opts = env.VMHUB_SSH_CONFIG ? ['-F', env.VMHUB_SSH_CONFIG] : [];
+  opts.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4');
+  if (env.VMHUB_SSH_KEY) opts.push('-i', env.VMHUB_SSH_KEY, '-o', 'IdentitiesOnly=yes');
+  return opts;
+}
+
+/**
+ * Options for the hop onto the Proxmox host. Connections are multiplexed
+ * (ControlMaster) so each tool call does not pay a fresh handshake — over a
+ * relayed Tailscale path that is the difference between 0.2s and 3s.
+ */
+export function jumpHostOpts(env: NodeJS.ProcessEnv = process.env, multiplex = true): string[] {
+  const opts = [...commonOpts(env), '-o', 'StrictHostKeyChecking=accept-new'];
+  if (multiplex && env.VMHUB_SSH_MULTIPLEX !== '0') {
+    const dir = env.VMHUB_SSH_CONTROL_DIR ?? `${homedir()}/.ssh`;
+    opts.push('-o', 'ControlMaster=auto', '-o', `ControlPath=${dir}/vmhub-%C`, '-o', 'ControlPersist=10m');
+  }
+  return opts;
+}
+
+/** ssh argv (minus the remote command) for a shell on the Proxmox host itself. */
+export function sshHostArgs(env: NodeJS.ProcessEnv = process.env): string[] {
+  return ['-T', ...jumpHostOpts(env), sshJumpTarget(env)];
+}
+
+/**
+ * Options for the hop into a lease VM. Clones reuse IPs from the static
+ * pool, so the guest's host key legitimately changes between leases: it is
+ * never recorded (UserKnownHostsFile=/dev/null) — the jump hop is the
+ * authenticated one.
+ */
+export function vmHopOpts(env: NodeJS.ProcessEnv = process.env): string[] {
+  // ssh expands %-tokens inside ProxyCommand itself, so the jump hop's own
+  // tokens (ControlPath=…%C) must be escaped to reach the inner ssh intact.
+  const inner = jumpHostOpts(env).map((o) => o.replace(/%/g, '%%'));
+  const proxy = ['ssh', ...inner, '-W', '%h:%p', sshJumpTarget(env)].join(' ');
   return [
-    '-T',
+    ...commonOpts(env),
     '-o', 'StrictHostKeyChecking=no',
-    '-o', `ProxyJump=${sshJumpTarget(env)}`,
-    `${vmSshUser(env)}@${vm.ip ?? ''}`,
+    '-o', 'UserKnownHostsFile=/dev/null',
+    '-o', 'LogLevel=ERROR',
+    '-o', `ProxyCommand=${proxy}`,
   ];
+}
+
+function requireIp(vm: Vm): string {
+  if (vm.status === 'error' || vm.status === 'destroyed') {
+    throw vmError('PROVISION_FAILED', `VM ${vm.uuid} does not exist on Proxmox — provisioning may have failed`);
+  }
+  if (!vm.ip) {
+    throw vmError('INTERNAL', `vmhub transport: VM ${vm.uuid} has no ip — the static NAT address is unset`);
+  }
+  return vm.ip;
+}
+
+/** ssh argv for one VM: `-T <opts> -o ProxyCommand=… root@<ip>`. */
+export function sshIntoVmArgs(vm: Vm, env: NodeJS.ProcessEnv = process.env): string[] {
+  return ['-T', ...vmHopOpts(env), `${vmSshUser(env)}@${vm.ip ?? ''}`];
+}
+
+/** scp argv prefix for one VM; append `src dst` using {@link scpRemote} for the VM side. */
+export function scpVmArgs(env: NodeJS.ProcessEnv = process.env): string[] {
+  return ['-q', '-r', ...vmHopOpts(env)];
+}
+
+/** `user@ip:path` for scp. */
+export function scpRemote(vm: Vm, path: string, env: NodeJS.ProcessEnv = process.env): string {
+  return `${vmSshUser(env)}@${requireIp(vm)}:${path}`;
 }
 
 /**
@@ -58,12 +134,7 @@ export function vmSshMcpTransport(
   env: NodeJS.ProcessEnv = process.env,
   envPrefix: Record<string, string> = {},
 ): StdioClientTransport {
-  if (vm.status === 'error' || vm.status === 'destroyed') {
-    throw vmError('PROVISION_FAILED', `VM ${vm.uuid} does not exist on Proxmox — provisioning may have failed`);
-  }
-  if (!vm.ip) {
-    throw vmError('INTERNAL', `vmhub transport: VM ${vm.uuid} has no ip — the static NAT address is unset`);
-  }
+  requireIp(vm);
   const prefix = Object.entries(envPrefix)
     .map(([k, v]) => `${k}=${v}`)
     .join(' ');
@@ -72,6 +143,86 @@ export function vmSshMcpTransport(
     command: 'ssh',
     args: [...sshIntoVmArgs(vm, env), remoteCommand],
   });
+}
+
+// ---------------------------------------------------------------------------
+// Port tunnels — reach an in-VM TCP service (CursorTouch :8000, adb :5555)
+// without a route to the guest network. `ssh -N -L 127.0.0.1:<free>:<ip>:<port>`
+// through the Proxmox host; one tunnel per (vm, port), closed on release.
+// ---------------------------------------------------------------------------
+
+interface Tunnel {
+  localPort: number;
+  child: ChildProcess;
+}
+
+const tunnels = new Map<string, Tunnel>();
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.unref();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+function portOpen(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = netConnect({ port, host: '127.0.0.1' });
+    s.once('connect', () => { s.destroy(); resolve(true); });
+    s.once('error', () => resolve(false));
+  });
+}
+
+/**
+ * Local port forwarded to `<vm.ip>:<remotePort>`. Reuses a live tunnel.
+ * Set VMHUB_DIRECT_GUEST_NET=1 when this machine routes 10.10.10.0/24
+ * itself (e.g. vmhub-mcp running on the Proxmox host) to skip tunnelling.
+ */
+export async function vmTunnel(vm: Vm, remotePort: number, env: NodeJS.ProcessEnv = process.env): Promise<{ host: string; port: number }> {
+  const ip = requireIp(vm);
+  if (env.VMHUB_DIRECT_GUEST_NET === '1') return { host: ip, port: remotePort };
+  const key = `${vm.uuid}:${remotePort}`;
+  const live = tunnels.get(key);
+  if (live && live.child.exitCode === null && (await portOpen(live.localPort))) {
+    return { host: '127.0.0.1', port: live.localPort };
+  }
+  live?.child.kill();
+  const localPort = await freePort();
+  // No multiplexing here: a multiplexed `ssh -L` hands the forward to the
+  // master and exits 0 immediately, so the child is neither a liveness signal
+  // nor something we could kill to close the tunnel. This child owns it.
+  const child = spawn('ssh', ['-N', ...jumpHostOpts(env, false), '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
+    '-o', 'ExitOnForwardFailure=yes', '-L', `127.0.0.1:${localPort}:${ip}:${remotePort}`, sshJumpTarget(env)],
+    { stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+  tunnels.set(key, { localPort, child });
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (await portOpen(localPort)) return { host: '127.0.0.1', port: localPort };
+    if (child.exitCode !== null) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  child.kill();
+  tunnels.delete(key);
+  throw vmError('INTERNAL', `vmhub transport: tunnel to ${ip}:${remotePort} via ${sshJumpTarget(env)} failed${stderr ? `: ${stderr.trim()}` : ''}`,
+    'Check that the Proxmox host is reachable over SSH (VMHUB_JUMP_HOST) and the in-VM service is listening.');
+}
+
+/** Close every tunnel held for a VM (called from adapter releaseConnection). */
+export function closeVmTunnels(vm: Pick<Vm, 'uuid'>): void {
+  for (const [key, t] of tunnels) {
+    if (key.startsWith(`${vm.uuid}:`)) {
+      t.child.kill();
+      tunnels.delete(key);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -5,11 +5,10 @@
  * screenshot, no input, no windowing. Every display method returns a typed
  * CAPABILITY_UNAVAILABLE.
  */
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type {
   CapabilityId,
   DesktopAdapter,
+  ExecOptions,
   ExecResult,
   FileCapability,
   InputAction,
@@ -22,9 +21,7 @@ import type {
 } from '../../src/shared/types.ts';
 import { CAPABILITIES } from '../../src/shared/types.ts';
 import { vmError } from '../../src/mcp/errors.ts';
-import { sshIntoVmArgs } from '../transport.ts';
-
-const execFileP = promisify(execFile);
+import { sshCloneRepo, sshExec, sshGetFile, sshPutFile } from '../ssh-ops.ts';
 
 export class HeadlessAdapter implements DesktopAdapter {
   readonly id = 'headless';
@@ -34,33 +31,31 @@ export class HeadlessAdapter implements DesktopAdapter {
     windowing: [] as WindowingSystem[],
     input: [] as InputCapability[],
     semantic: 'none' as const,
-    files: [] as FileCapability[],
+    files: ['scp'] as FileCapability[],
     exec: true,
     notes: 'Headless Linux golden (debian-13-golden): lease for exec/SSH, no display tools.',
   };
 
   availableTools(): CapabilityId[] {
-    // No display tools by design. exec is declared (SSH) but the 22-tool
-    // surface has no vm_exec tool, so nothing gates on it.
-    return [CAPABILITIES.exec];
+    // No display tools by design: a shell, files and git over SSH.
+    return [CAPABILITIES.exec, CAPABILITIES.putFile, CAPABILITIES.getFile, CAPABILITIES.cloneRepo];
   }
 
-  /** Run a command in the VM over the same SSH transport the desktop adapters use. */
-  async exec(vm: Vm, cmd: string, args: string[] = []): Promise<ExecResult> {
-    if (!vm.ip) {
-      throw vmError('INTERNAL', `headless adapter: VM ${vm.uuid} has no ip — cannot run exec`);
-    }
-    try {
-      const { stdout, stderr } = await execFileP('ssh', [...sshIntoVmArgs(vm), cmd, ...args], { timeout: 30_000 });
-      return { exitCode: 0, stdout, stderr };
-    } catch (e) {
-      const err = e as { code?: number | string; stdout?: string; stderr?: string };
-      return {
-        exitCode: typeof err.code === 'number' ? err.code : 1,
-        stdout: err.stdout ?? '',
-        stderr: err.stderr ?? (e instanceof Error ? e.message : String(e)),
-      };
-    }
+  /** Shell in the VM over the same SSH hop as the MCP transport. */
+  async exec(vm: Vm, cmd: string, args: string[] = [], opts: ExecOptions = {}): Promise<ExecResult> {
+    return sshExec(vm, cmd, args, opts);
+  }
+
+  async putFile(vm: Vm, localPath: string, remotePath: string): Promise<void> {
+    return sshPutFile(vm, localPath, remotePath);
+  }
+
+  async getFile(vm: Vm, remotePath: string, localPath: string): Promise<void> {
+    return sshGetFile(vm, remotePath, localPath);
+  }
+
+  async cloneRepo(vm: Vm, repoUrl: string, destPath: string): Promise<void> {
+    return sshCloneRepo(vm, repoUrl, destPath);
   }
 
   async screenshot(_vm: Vm): Promise<ScreenshotResult> {

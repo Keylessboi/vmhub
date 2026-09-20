@@ -13,7 +13,7 @@ import { CAPABILITIES } from '../shared/types.ts';
 import type { AdapterRegistry } from '../../adapters/index.ts';
 import { vmError } from './errors.ts';
 
-/** The 23 vm_* tools, in registration order (also the doc order). */
+/** The 27 vm_* tools, in registration order (also the doc order). */
 export const VM_TOOLS = [
   'vm_list_templates',
   'vm_capabilities',
@@ -38,6 +38,10 @@ export const VM_TOOLS = [
   'vm_put_file',
   'vm_get_file',
   'vm_clone_repo',
+  'vm_exec',
+  'vm_snapshot',
+  'vm_network',
+  'vm_capture',
 ] as const;
 
 export type VmToolName = (typeof VM_TOOLS)[number];
@@ -67,6 +71,10 @@ export const TOOL_CAPABILITY: Record<VmToolName, CapabilityId | null> = {
   vm_put_file: CAPABILITIES.putFile,
   vm_get_file: CAPABILITIES.getFile,
   vm_clone_repo: CAPABILITIES.cloneRepo,
+  vm_exec: CAPABILITIES.exec,
+  vm_snapshot: null,
+  vm_network: null,
+  vm_capture: null,
 };
 
 /** Capabilities the 22-tool surface can actually serve. */

@@ -1,5 +1,77 @@
 # Golden VM build recipes (2026-08-14)
 
+## Live status (2026-09-19, `scripts/e2e-lab.ts` against the deployed control plane)
+
+| VMID | Golden | E2E | Notes |
+|---|---|---|---|
+| 2030 | debian-13-golden (headless) | all pass | exec, files, network policy, capture, snapshots |
+| 2060 | x11-2404 | all pass | needed `ciupgrade=0` on clones, and X as a service (see below) |
+| 2070 | hyprland-2404 | all pass | rebuilt with `wtype` (hyprland-mcp's typing/key backend); old image kept as stopped VM 9071 |
+| 2100 | windows-11-24h2 | all pass | rebuilt 2026-09-19 (see below); old image kept as stopped VM 9102 |
+| 2110 | bliss-android16 | 20/24 | rebuilt 2026-09-19: boots, adb + `adb root`, screen/input/files, network policy, capture, lease/release all work. Open: clones have no default route (see below), so no internet or DNS, and a snapshot revert left /data unchanged |
+
+**The Android golden (BlissOS 16.9.7 / Android 13).** What it needed, and
+what to keep in any rebuild:
+- **It did not boot at all.** The stock GRUB default hangs on QEMU's
+  display; BlissOS ships VM-safe variants under "VM Options". The golden now
+  boots a `vmhub-lab` entry (`nomodeset HWACCEL=0 SETUPWIZARD=0`) set as the
+  default, so nothing has to catch a 5-second menu. The image is a legacy
+  BIOS install — OVMF cannot boot it (`No bootable option`), despite the
+  earlier note here.
+- **No DHCP and no cloud-init**, and Android will not leave a hand-made
+  config alone. dnsmasq on vmbr1 never answers Android's DISCOVER, so the
+  image configures itself — but two earlier attempts failed and are worth
+  not repeating:
+  - a `bootcomplete` hook in `/system/etc/init.sh` never ran on a fresh
+    clone (boot-complete waits for the device to finish booting past its
+    lock screen), so clones had no network at all;
+  - a one-shot init service did run, but Android's own Ethernet stack
+    reconfigures `eth0` afterwards and dropped the address, so ADB appeared
+    and then vanished a few minutes later.
+
+  The golden now ships `/system/bin/vmhub-net.sh` as a **long-running**
+  init service (`/system/etc/init/vmhub-net.rc`, class `late_start`, root)
+  that re-asserts every 5s: the static address, the routes — written into
+  Android's own tables (`local_network`, `eth0`), since Android routes per
+  network and ignores a default route in `main` — and `service.adb.tcp.port`.
+  The boot entry also sets `androidboot.selinux=permissive` so the service
+  may touch the routing tables.
+- **Every clone carries that address**, so vmhub-lite refuses a second
+  Android lease rather than hand out a colliding VM.
+- **adbd on tcp 5555** (`service.adb.tcp.port`, plus a persisted
+  `persist.adb.tcp.port`), and `adb root` works — the adapter escalates on
+  connect, falling back to `su -c`.
+- **Rebuild the template, never the base volume.** Editing
+  `base-<vmid>-disk-0` after `qm template` does NOT reach clones: they are
+  created from its `@__base__` snapshot. Clone to a staging VMID, change
+  that, verify, then swap it into the golden's VMID.
+- **Known gap: no DNS inside Android.** `cmd netd resolver setnetdns` fails
+  (rc 218) and this build has no `cmd ethernet`, so names do not resolve;
+  traffic by IP works. The proper fix is an Ethernet IpConfiguration
+  (`/data/misc/ethernet/ipconfig.txt`) or setting it once in Settings and
+  re-sealing the golden.
+
+**The x11 desktop is a systemd service, not a login side effect.** The first
+golden ran `startx` from vmuser's `~/.bash_profile` on tty1 autologin. That
+races with boot and loses often enough to matter: the clone comes up with no
+X server at all, so screenshots and xdotool fail while SSH works fine. The
+rebuilt golden ships `vmhub-x11.service` (Xorg + openbox on vt2, `User=vmuser`,
+`PAMName=login`, `Restart=always`), sets `allowed_users=anybody` in
+`/etc/X11/Xwrapper.config` (a unit is not a console user), and the
+`.bash_profile` block is disabled so the two cannot both start X.
+
+**Clones boot with `ciupgrade=0`.** Proxmox defaults cloud-init to a full
+`dist-upgrade` on a clone's first boot. On the x11 golden that replaced
+`xserver-xorg-core` under the running session, so no clone had a display until
+its second boot. vmhub-lite now sets `ciupgrade=0` (opt back in with
+`VMHUB_GUEST_UPGRADE=1`); refresh goldens instead of upgrading every lease.
+
+**Rebuilding a golden without touching the live one:** `qm clone <golden> <staging> --full`,
+boot it, change it, then `apt-get clean; rm -f /var/lib/vmhub-golden-refreshed;
+cloud-init clean --logs; truncate -s0 /etc/machine-id`, power off, restore the
+golden's `ipconfig0`, `qm template <staging>`, run `scripts/e2e-lab.ts <staging>`,
+and only then swap it into the golden's VMID (keep a full-clone backup of the old one).
+
 How each golden template was built, the gotchas, and what a fresh clone needs.
 
 ## Shared base: debian-13-golden (VMID 2030)
@@ -39,6 +111,9 @@ Built from debian-13-golden. Critical learnings (all cost real time):
    ```
 6. **Hyprland config** at /home/vmuser/.config/hypr/hyprland.conf (minimal:
    no animations, border colors, wl-clipboard watch).
+7. **`wtype`** (`apt-get install wtype`) — hyprland-mcp's input_type/input_key
+   backend. Missing from the first build; every typing call failed with
+   "wtype not found" until the 2026-09-19 rebuild.
 
 ### Verified transport (the full adapter path)
 Desktop → `ssh -T -o ProxyJump=root@192.168.1.220 root@<vm-ip>
@@ -212,7 +287,31 @@ as unavailable until `qm template 2100` runs.
      `windows-mcp serve --transport streamable-http --host 0.0.0.0 --port 8000`
    - adapter connects to `http://<vm-ip>:8000/mcp/` with `Bearer <key>`
    - set `ANONYMIZED_TELEMETRY=false` (cloned goldens shouldn't phone home)
-7. **Convert to golden template** (after activation). The adapter
+7. **What the first golden got wrong** (all fixed in the 2026-09-19 rebuild, and what to preserve in any future Windows golden):
+   - **Do not leave the image generalized.** A sysprepped image re-ran
+     Windows' specialize pass on every clone: 15-20 minutes of "Getting
+     devices ready" and ~8 GB of disk writes per lease. The lab image is
+     specialized once, then templated; clones are ready in ~2 minutes.
+   - **Autologon is required.** CursorTouch drives the interactive desktop
+     and its scheduled task (`windows-mcp-server`) triggers *at logon*, so
+     with no autologon nothing ever started. Set `AutoAdminLogon`,
+     `DefaultUserName`, `DefaultPassword` under Winlogon.
+   - **`ip_allowlist` must contain the guest network** (`10.10.10.0/24`):
+     tool calls arrive from the bridge gateway, not the LAN, so the build's
+     `192.168.1.0/24` entry rejected everything with 403 Forbidden.
+   - **`exclude` must be empty.** The build excluded PowerShell, Registry,
+     Process and FileSystem — exactly the tools a lab VM exists to offer;
+     vm_exec and file transfer cannot work without PowerShell.
+   - **config.toml must not have a UTF-8 BOM** — the TOML parser fails with
+     "Invalid statement (at line 1, column 1)" and the server exits.
+   - The guest keeps a **static IP baked in**; cloud-init does not reach
+     Windows. vmhub-lite rewrites it to the lease address over the guest
+     agent at readiness, so the golden's own address does not matter.
+   - `scripts/cursortouch-tools.ts <vm-ip>` prints the in-VM tool surface;
+     check it after a CursorTouch upgrade, since the adapter maps
+     vm_* calls onto those exact tool names and argument shapes.
+
+8. **Convert to golden template** (after activation). The adapter
    (adapters/windows/index.ts) is wired for streamable-http + Bearer auth;
    set `CURSORTOUCH_AUTH_KEY` via Doppler/env.
 

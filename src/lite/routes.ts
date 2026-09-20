@@ -31,6 +31,7 @@
 import { statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { ProxmoxClient } from "./proxmox.ts";
+import { MockProxmox } from "./proxmox.ts";
 import { proxmoxDiskFreePercent } from "./proxmox.ts";
 import { isVmError, vmError } from "../mcp/errors.ts";
 import { DEFAULT_NODE_ID } from "../shared/schema.ts";
@@ -46,6 +47,7 @@ import type {
   Vm,
   VmError,
   VmNode,
+  NetworkMode,
 } from "../shared/types.ts";
 
 // ---------------------------------------------------------------------------
@@ -227,6 +229,50 @@ interface LeaseCreateBody {
   owner?: unknown;
   ttl_ms?: unknown;
   ttlMs?: unknown;
+  network?: unknown;
+}
+
+/**
+ * The network mode a new lease starts in. An explicit request is a hard
+ * requirement (the lease fails if it cannot be enforced — a malware sample
+ * must never get a moment of LAN access); the deployment default
+ * (VMHUB_DEFAULT_NETWORK, "internet" unless set to "unmanaged") is best-effort.
+ */
+interface InitialNetwork {
+  mode: NetworkMode | null;
+  required: boolean;
+}
+
+function parseInitialNetwork(value: unknown): InitialNetwork {
+  if (value === "internet" || value === "isolated") return { mode: value, required: true };
+  if (value !== undefined && value !== null) {
+    throw invalidRequest("'network' must be \"internet\" or \"isolated\"");
+  }
+  const dflt = process.env.VMHUB_DEFAULT_NETWORK ?? "internet";
+  return { mode: dflt === "internet" || dflt === "isolated" ? dflt : null, required: false };
+}
+
+/** Apply the lease's starting network policy before the VM first boots. */
+async function applyInitialNetwork(client: ProxmoxClient, vmid: number, net: InitialNetwork): Promise<void> {
+  if (!net.mode) return;
+  try {
+    const policy = await client.setNetworkPolicy(vmid, net.mode);
+    // An explicit mode is a hard requirement: hold first boot until the
+    // host firewall has compiled the new VM's rules (~10s cycle).
+    const settleMs = Number(process.env.VMHUB_FIREWALL_SETTLE_MS ?? 12_000);
+    if (net.required && settleMs > 0 && !(client instanceof MockProxmox)) {
+      await new Promise((r) => setTimeout(r, settleMs));
+    }
+    if (net.required && !policy.enforced) {
+      throw vmError("PROVISION_FAILED", `network '${net.mode}' requested but not enforced: ${policy.reason ?? "unknown"}`);
+    }
+  } catch (err) {
+    if (net.required) {
+      await client.destroyVm(vmid).catch(() => {});
+      throw err;
+    }
+    console.error(`[lite] default network policy not applied to vm ${vmid}: ${describeError(err)}`);
+  }
 }
 
 function firstString(...values: unknown[]): string | undefined {
@@ -294,6 +340,7 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
   const requestId = firstString(body.request_id, body.requestId, req.headers.get("x-request-id"));
   const templateId = firstString(body.template_id, body.templateId);
   const owner = typeof body.owner === "string" ? body.owner : "unknown";
+  const network = parseInitialNetwork(body.network);
 
   if (!requestId) {
     throw invalidRequest("'request_id' is required — it is the idempotency key");
@@ -321,6 +368,19 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
   }
   if (tpl.availability !== "available") throw unavailableTemplate(tpl);
 
+  // Android images carry their IP (no cloud-init, no DHCP on the bridge), so
+  // two Android leases would collide on the same address.
+  if (tpl.os === "android") {
+    const live = ctx.db.listVms().find((v) => v.adapter === "android" && v.status !== "destroyed");
+    if (live) {
+      throw vmError(
+        "HOST_CAPACITY",
+        `an Android lease already exists (vm ${live.uuid}); the Android golden has a fixed guest IP, so only one runs at a time`,
+        "release the other Android lease first",
+      );
+    }
+  }
+
   await assertDiskSpace(ctx);
 
   const requestedTtl = positiveMs(body.ttl_ms) ?? positiveMs(body.ttlMs);
@@ -332,7 +392,7 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
   // create the VM through that node's client. Single-node mode (no registry)
   // keeps the legacy path byte-identical.
   if (ctx.nodes && ctx.probe) {
-    return createRoutedLease(req, ctx, templates, tpl, requestId, owner, initialTtl);
+    return createRoutedLease(req, ctx, templates, tpl, requestId, owner, initialTtl, network);
   }
 
   const now = ctx.now();
@@ -374,6 +434,7 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
     });
     vm.vmid = pvm.vmid;
     vm.ip = pvm.ip;
+    await applyInitialNetwork(ctx.proxmox, pvm.vmid, network);
     ctx.db.insertVm(vm);
     try {
       await ctx.proxmox.startVm(pvm.vmid);
@@ -409,17 +470,7 @@ async function createLease(req: Request, ctx: ResolvedDeps): Promise<Response> {
         );
       }
     }
-    const probe = await ctx.proxmox.probeCapabilities(pvm.vmid);
-    if (!probe.available) {
-      ctx.db.deleteVm(uuid);
-      await ctx.proxmox.destroyVm(pvm.vmid);
-      throw vmError(
-        "CAPABILITY_UNAVAILABLE",
-        `template '${templateId}' probe failed: ${probe.reason}`,
-        probe.reason,
-      );
-    }
-    ctx.db.updateVmStatus(uuid, "ready");
+    await settleReadiness(ctx, ctx.proxmox, uuid, pvm.vmid, templateId, tpl.os);
   };
 
   if (useLockedCreate) {
@@ -483,6 +534,7 @@ async function createRoutedLease(
   requestId: string,
   owner: string,
   initialTtl: number,
+  network: InitialNetwork,
 ): Promise<Response> {
   const now = ctx.now();
   const uuid = ctx.uuid();
@@ -555,6 +607,7 @@ async function createRoutedLease(
       });
       vm.vmid = pvm.vmid;
       vm.ip = pvm.ip;
+      await applyInitialNetwork(client, pvm.vmid, network);
       ctx.db.insertVm(vm);
       try {
         await client.startVm(pvm.vmid);
@@ -578,17 +631,7 @@ async function createRoutedLease(
               );
         }
       }
-      const probe = await client.probeCapabilities(pvm.vmid);
-      if (!probe.available) {
-        ctx.db.deleteVm(uuid);
-        await client.destroyVm(pvm.vmid);
-        throw vmError(
-          "CAPABILITY_UNAVAILABLE",
-          `template '${tpl.id}' probe failed: ${probe.reason}`,
-          probe.reason,
-        );
-      }
-      ctx.db.updateVmStatus(uuid, "ready");
+      await settleReadiness(ctx, client, uuid, pvm.vmid, tpl.id, tpl.os);
     });
   } else {
     const pvm = await ctx.nodeLock.run(nodeId, async () => {
@@ -610,6 +653,7 @@ async function createRoutedLease(
     });
     vm.vmid = pvm.vmid;
     vm.ip = pvm.ip;
+    await applyInitialNetwork(client, pvm.vmid, network);
     try {
       await client.startVm(pvm.vmid);
     } catch (err) {
@@ -630,18 +674,9 @@ async function createRoutedLease(
             );
       }
     }
-    const probe = await client.probeCapabilities(pvm.vmid);
-    if (!probe.available) {
-      await client.destroyVm(pvm.vmid);
-      throw vmError(
-        "CAPABILITY_UNAVAILABLE",
-        `template '${tpl.id}' probe failed: ${probe.reason}`,
-        probe.reason,
-      );
-    }
-    vm.status = USE_PROVISIONING ? "provisioning" : "ready";
+    vm.status = USE_PROVISIONING ? "provisioning" : "starting";
     ctx.db.insertVm(vm);
-    ctx.db.updateVmStatus(uuid, "ready");
+    await settleReadiness(ctx, client, uuid, pvm.vmid, tpl.id, tpl.os);
   }
 
   try {
@@ -750,8 +785,12 @@ async function renewLease(req: Request, ctx: ResolvedDeps, id: string): Promise<
 async function releaseLease(req: Request, ctx: ResolvedDeps, id: string): Promise<Response> {
   const lease = ctx.db.getLease(id);
   if (!lease) throw notFound(`lease '${id}' not found`);
-  if (lease.status === "released") {
-    // Idempotent release — a retry after success returns the same answer.
+  const already = lease.status === "released";
+  // A retry is idempotent, but only once the VM is really gone: a first
+  // release whose destroy failed (Proxmox lock, a VM mid-rollback) used to
+  // leave the VM running forever while every later call answered
+  // "released". If a VM row survives, tear it down before agreeing.
+  if (already && !ctx.db.getVm(lease.vmId)) {
     return json({ vmId: id, status: "released" });
   }
 
@@ -847,6 +886,112 @@ function statSize(path: string): number {
   }
 }
 
+
+/** How long lease creation waits inline for the guest before finishing in the background. */
+const READY_INLINE_MS = 5_000;
+
+/**
+ * Mark the VM ready once the guest has booted. Quick guests (and the mock)
+ * finish inline; slow ones (Windows takes minutes) finish in the background
+ * so the create request returns promptly — the MCP side already polls
+ * vm_lease_status until the status is ready/error. A failed probe marks the
+ * VM "error" rather than destroying a VM that is already leased.
+ */
+async function settleReadiness(
+  ctx: ResolvedDeps,
+  client: ProxmoxClient,
+  uuid: string,
+  vmid: number,
+  templateId: string,
+  os?: Template["os"],
+): Promise<void> {
+  let inline = true;
+  const done = (async (): Promise<{ available: boolean; reason?: string }> => {
+    try {
+      const probe = await client.probeCapabilities(vmid, os);
+      if (!inline && ctx.db.getVm(uuid)) {
+        ctx.db.updateVmStatus(uuid, probe.available ? "ready" : "error");
+        if (!probe.available) console.error(`[lite] vm ${vmid} not ready: ${probe.reason}`);
+      }
+      return probe;
+    } catch (err) {
+      if (!inline && ctx.db.getVm(uuid)) ctx.db.updateVmStatus(uuid, "error");
+      console.error(`[lite] readiness check for vm ${vmid} failed: ${describeError(err)}`);
+      return { available: false, reason: describeError(err) };
+    }
+  })();
+  const inlineResult = await Promise.race([done, new Promise<null>((r) => setTimeout(() => r(null), READY_INLINE_MS))]);
+  inline = false;
+  if (inlineResult === null) return; // still booting — finishes in the background
+  if (!inlineResult.available) {
+    // Failed straight away: the caller hears about it now, nothing is left behind.
+    ctx.db.deleteVm(uuid);
+    await client.destroyVm(vmid);
+    throw vmError("CAPABILITY_UNAVAILABLE", `template '${templateId}' probe failed: ${inlineResult.reason}`, inlineResult.reason);
+  }
+  ctx.db.updateVmStatus(uuid, "ready");
+}
+
+// ---------------------------------------------------------------------------
+// Snapshots + network policy (the lab controls)
+// ---------------------------------------------------------------------------
+
+const SNAPSHOT_NAME = /^[A-Za-z][A-Za-z0-9_-]{1,39}$/;
+
+/** The VM row + the client of the node it lives on; refuses VMs not yet cloned. */
+function vmAndClient(ctx: ResolvedDeps, uuid: string): { vm: VmRow; client: ProxmoxClient } {
+  const vm = ctx.db.getVm(uuid);
+  if (!vm) throw notFound(`vm '${uuid}' not found`);
+  if (!vm.vmid) throw invalidRequest(`vm '${uuid}' has no Proxmox VM yet (status ${vm.status})`);
+  return { vm, client: ctx.nodes?.client(vm.nodeId) ?? ctx.proxmox };
+}
+
+async function listSnapshots(_req: Request, ctx: ResolvedDeps, uuid: string): Promise<Response> {
+  const { vm, client } = vmAndClient(ctx, uuid);
+  return json(await client.listSnapshots(vm.vmid));
+}
+
+async function createSnapshot(req: Request, ctx: ResolvedDeps, uuid: string): Promise<Response> {
+  const { vm, client } = vmAndClient(ctx, uuid);
+  const body = (await readJson(req)) as { name?: unknown; description?: unknown; with_memory?: unknown };
+  const name = firstString(body.name);
+  if (!name || !SNAPSHOT_NAME.test(name)) {
+    throw invalidRequest("'name' must start with a letter and use 2-40 of [A-Za-z0-9_-]");
+  }
+  await assertDiskSpace(ctx);
+  await client.createSnapshot(vm.vmid, name, {
+    description: typeof body.description === "string" ? body.description : undefined,
+    withMemory: body.with_memory === true,
+  });
+  return json({ created: name, snapshots: await client.listSnapshots(vm.vmid) }, 201);
+}
+
+async function rollbackSnapshot(_req: Request, ctx: ResolvedDeps, uuid: string, name: string): Promise<Response> {
+  const { vm, client } = vmAndClient(ctx, uuid);
+  await client.rollbackSnapshot(vm.vmid, name);
+  return json({ rolledBack: name });
+}
+
+async function deleteSnapshot(_req: Request, ctx: ResolvedDeps, uuid: string, name: string): Promise<Response> {
+  const { vm, client } = vmAndClient(ctx, uuid);
+  await client.deleteSnapshot(vm.vmid, name);
+  return json({ deleted: name });
+}
+
+async function getNetwork(_req: Request, ctx: ResolvedDeps, uuid: string): Promise<Response> {
+  const { vm, client } = vmAndClient(ctx, uuid);
+  return json(await client.getNetworkPolicy(vm.vmid));
+}
+
+async function setNetwork(req: Request, ctx: ResolvedDeps, uuid: string): Promise<Response> {
+  const { vm, client } = vmAndClient(ctx, uuid);
+  const body = (await readJson(req)) as { mode?: unknown };
+  if (body.mode !== "internet" && body.mode !== "isolated") {
+    throw invalidRequest("'mode' must be \"internet\" or \"isolated\"");
+  }
+  return json(await client.setNetworkPolicy(vm.vmid, body.mode as NetworkMode));
+}
+
 // ---------------------------------------------------------------------------
 // Routing
 // ---------------------------------------------------------------------------
@@ -873,6 +1018,12 @@ const ROUTES: Route[] = [
   { method: "GET", segments: ["v1", "artifacts", ":id"], handler: getArtifact },
   { method: "POST", segments: ["v1", "vms", ":id", "tool-calls", "increment"], handler: incrementToolCalls },
   { method: "POST", segments: ["v1", "vms", ":id", "tool-calls", "decrement"], handler: decrementToolCalls },
+  { method: "GET", segments: ["v1", "vms", ":id", "snapshots"], handler: listSnapshots },
+  { method: "POST", segments: ["v1", "vms", ":id", "snapshots"], handler: createSnapshot },
+  { method: "POST", segments: ["v1", "vms", ":id", "snapshots", ":name", "rollback"], handler: rollbackSnapshot },
+  { method: "DELETE", segments: ["v1", "vms", ":id", "snapshots", ":name"], handler: deleteSnapshot },
+  { method: "GET", segments: ["v1", "vms", ":id", "network"], handler: getNetwork },
+  { method: "PUT", segments: ["v1", "vms", ":id", "network"], handler: setNetwork },
 ];
 
 export function createLiteHandler(deps: RouterDeps): (req: Request) => Promise<Response> {

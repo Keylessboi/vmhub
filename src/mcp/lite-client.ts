@@ -6,7 +6,7 @@
  * to a typed VmError (src/shared). request_id rides on POST /v1/leases so
  * retries with the same key return the same lease (lite dedupes).
  */
-import type { ArtifactRecord, Lease, Template, Vm, VmError } from '../shared/types.ts';
+import type { ArtifactRecord, Lease, NetworkMode, NetworkPolicy, Template, Vm, VmError, VmSnapshot } from '../shared/types.ts';
 import { LITE_TIMEOUT_MS, isVmError, makeVmError, vmError } from './errors.ts';
 
 /** Default lite URL — override with VMHUB_LITE_URL. */
@@ -23,7 +23,7 @@ export interface LeaseResponse {
 
 export interface LiteClient {
   /** POST /v1/leases — create a lease (idempotent on request_id). */
-  createLease(input: { templateId: string; owner: string; requestId: string; ttlMs?: number }): Promise<LeaseResponse>;
+  createLease(input: { templateId: string; owner: string; requestId: string; ttlMs?: number; network?: NetworkMode }): Promise<LeaseResponse>;
   /** GET /v1/leases/{id}. */
   getLease(leaseId: string): Promise<LeaseResponse>;
   /** POST /v1/leases/{id}/renew. */
@@ -44,6 +44,13 @@ export interface LiteClient {
   incrementToolCalls(vmUuid: string): Promise<void>;
   /** POST /v1/vms/{uuid}/tool-calls/decrement — drain protection. */
   decrementToolCalls(vmUuid: string): Promise<void>;
+  /** Lab controls (optional so older fakes/lite builds still type-check). */
+  listSnapshots?(vmUuid: string): Promise<VmSnapshot[]>;
+  createSnapshot?(vmUuid: string, input: { name: string; description?: string; withMemory?: boolean }): Promise<{ created: string; snapshots: VmSnapshot[] }>;
+  rollbackSnapshot?(vmUuid: string, name: string): Promise<void>;
+  deleteSnapshot?(vmUuid: string, name: string): Promise<void>;
+  getNetwork?(vmUuid: string): Promise<NetworkPolicy>;
+  setNetwork?(vmUuid: string, mode: NetworkMode): Promise<NetworkPolicy>;
 }
 
 export class HttpLiteClient implements LiteClient {
@@ -52,10 +59,11 @@ export class HttpLiteClient implements LiteClient {
     private readonly requestIdProvider: () => string = () => crypto.randomUUID(),
   ) {}
 
-  async createLease(input: { templateId: string; owner: string; requestId: string; ttlMs?: number }): Promise<LeaseResponse> {
+  async createLease(input: { templateId: string; owner: string; requestId: string; ttlMs?: number; network?: NetworkMode }): Promise<LeaseResponse> {
     return this.request<LeaseResponse>('POST', '/v1/leases', {
-      body: { template_id: input.templateId, owner: input.owner, request_id: input.requestId, ttl_ms: input.ttlMs },
+      body: { template_id: input.templateId, owner: input.owner, request_id: input.requestId, ttl_ms: input.ttlMs, network: input.network },
       requestId: input.requestId,
+      timeoutMs: 120_000,
     });
   }
 
@@ -70,7 +78,8 @@ export class HttpLiteClient implements LiteClient {
   }
 
   async releaseLease(leaseId: string): Promise<void> {
-    await this.request('DELETE', `/v1/leases/${encodeURIComponent(leaseId)}`);
+    // Destroy = stop + wait + delete on Proxmox; well past the 10s default.
+    await this.request('DELETE', `/v1/leases/${encodeURIComponent(leaseId)}`, { timeoutMs: 180_000 });
   }
 
   getTemplates(): Promise<Template[]> {
@@ -114,10 +123,37 @@ export class HttpLiteClient implements LiteClient {
     await this.request('POST', `/v1/vms/${encodeURIComponent(vmUuid)}/tool-calls/decrement`);
   }
 
+  listSnapshots(vmUuid: string): Promise<VmSnapshot[]> {
+    return this.request('GET', `/v1/vms/${encodeURIComponent(vmUuid)}/snapshots`);
+  }
+
+  createSnapshot(vmUuid: string, input: { name: string; description?: string; withMemory?: boolean }): Promise<{ created: string; snapshots: VmSnapshot[] }> {
+    return this.request('POST', `/v1/vms/${encodeURIComponent(vmUuid)}/snapshots`, {
+      body: { name: input.name, description: input.description, with_memory: input.withMemory },
+      timeoutMs: 900_000,
+    });
+  }
+
+  async rollbackSnapshot(vmUuid: string, name: string): Promise<void> {
+    await this.request('POST', `/v1/vms/${encodeURIComponent(vmUuid)}/snapshots/${encodeURIComponent(name)}/rollback`, { timeoutMs: 900_000 });
+  }
+
+  async deleteSnapshot(vmUuid: string, name: string): Promise<void> {
+    await this.request('DELETE', `/v1/vms/${encodeURIComponent(vmUuid)}/snapshots/${encodeURIComponent(name)}`, { timeoutMs: 300_000 });
+  }
+
+  getNetwork(vmUuid: string): Promise<NetworkPolicy> {
+    return this.request('GET', `/v1/vms/${encodeURIComponent(vmUuid)}/network`, { timeoutMs: 60_000 });
+  }
+
+  setNetwork(vmUuid: string, mode: NetworkMode): Promise<NetworkPolicy> {
+    return this.request('PUT', `/v1/vms/${encodeURIComponent(vmUuid)}/network`, { body: { mode }, timeoutMs: 120_000 });
+  }
+
   private async request<T>(
     method: string,
     path: string,
-    opts: { body?: Record<string, unknown>; requestId?: string } = {},
+    opts: { body?: Record<string, unknown>; requestId?: string; timeoutMs?: number } = {},
   ): Promise<T> {
     let res: Response;
     try {
@@ -128,7 +164,7 @@ export class HttpLiteClient implements LiteClient {
           ...(opts.requestId ? { 'x-request-id': opts.requestId } : {}),
         },
         body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-        signal: AbortSignal.timeout(LITE_TIMEOUT_MS),
+        signal: AbortSignal.timeout(opts.timeoutMs ?? LITE_TIMEOUT_MS),
       });
     } catch (e) {
       throw makeVmError('INTERNAL', `vmhub-lite unreachable at ${this.baseUrl}`, {

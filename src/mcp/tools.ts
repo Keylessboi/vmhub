@@ -1,5 +1,5 @@
 /**
- * The 23 vm_* tools. Every handler: resolve VM → adapter → capability gate →
+ * The 27 vm_* tools. Every handler: resolve VM → adapter → capability gate →
  * adapter call → typed result or typed VmError. Tools are NEVER absent;
  * unsupported capability = CAPABILITY_UNAVAILABLE error (see capabilities.ts).
  */
@@ -12,6 +12,10 @@ import { assertToolAvailable, capabilityReport, getTemplate, mergeDerivedTemplat
 import { capabilityUnavailableError, errorResult, makeVmError, okResult, toVmError, vmError } from './errors.ts';
 import { pollUntil, POLL_BOUND_MS } from './polling.ts';
 import { writeScreenshot } from './files.ts';
+import { CaptureManager } from './capture.ts';
+
+/** One capture per VM, owned by this server process. */
+const captures = new CaptureManager();
 
 const DRAIN_ENABLED = process.env.VMHUB_TOOL_DRAIN !== 'false';
 
@@ -356,10 +360,11 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         owner: z.string().describe('Who owns the lease (agent/session id). Examples: "opencode", "agent-1", "claude-session-abc123"'),
         request_id: z.string().describe('Idempotency key — reuse on retries. Any unique string, e.g. "lease-12345", "req-2026-08-18-001"'),
         ttl_ms: z.number().int().positive().max(86_400_000).optional().describe('Lease lifetime cap in ms (default 24h). Example: 3600000 for 1 hour'),
+        network: z.enum(['internet', 'isolated']).optional().describe('Network the VM boots into. "internet": outbound internet but no LAN/tailnet/other VMs. "isolated": no outbound traffic at all. Omit for the deployment default (internet). Use "isolated" for untrusted samples — the lease fails rather than boot unenforced.'),
       }),
       annotations: { destructiveHint: true },
     },
-    async ({ template_id, owner, request_id, ttl_ms }) => {
+    async ({ template_id, owner, request_id, ttl_ms, network }) => {
       const start = Date.now();
       try {
         const now = Date.now();
@@ -383,7 +388,7 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         }
         // Forward the RESOLVED id (a real Proxmox VMID when one exists), never
         // a local adapter alias lite cannot clone.
-        const created = await deps.lite.createLease({ templateId: template.id, owner, requestId: request_id, ttlMs: ttl_ms });
+        const created = await deps.lite.createLease({ templateId: template.id, owner, requestId: request_id, ttlMs: ttl_ms, network });
         const outcome = await pollUntil(
           () => deps.lite.getLease(created.lease.vmId),
           (s) => DONE_STATUSES.has(s.vm.status),
@@ -494,6 +499,9 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             const adapter = deps.registry.get(adapterId);
             adapter.releaseConnection?.({ uuid: vmUuid } as Vm);
           } catch {}
+        }
+        if (vmUuid) {
+          captures.abandon(vmUuid);
         }
         return okResult('vm_lease_release', { released: true, lease_id }, start);
       } catch (e) {
@@ -930,6 +938,154 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         }
       } catch (e) {
         return errorResult('vm_clone_repo', toVmError(e, 'vm_clone_repo'), start);
+      }
+    },
+  );
+  registerLabTools(server, deps);
+}
+
+/** A lab-control method of the lite client, or CAPABILITY_UNAVAILABLE on an old lite. */
+function labMethod<K extends 'listSnapshots' | 'createSnapshot' | 'rollbackSnapshot' | 'deleteSnapshot' | 'getNetwork' | 'setNetwork'>(
+  deps: McpDeps,
+  name: K,
+): NonNullable<McpDeps['lite'][K]> {
+  const fn = deps.lite[name];
+  if (!fn) throw vmError('CAPABILITY_UNAVAILABLE', `this vmhub-lite has no ${name} endpoint`, 'Deploy a vmhub-lite build with snapshot/network support.');
+  return fn.bind(deps.lite) as NonNullable<McpDeps['lite'][K]>;
+}
+
+/**
+ * The lab tools: a shell, snapshots, network policy and packet capture —
+ * what turns a remote desktop into a place to test software and watch what
+ * it does.
+ */
+function registerLabTools(server: McpServer, deps: McpDeps): void {
+  server.registerTool(
+    'vm_exec',
+    {
+      title: 'Run a shell command in the VM',
+      description:
+        'Run a command inside the VM and get exit code, stdout and stderr. Linux VMs run it with bash -c as root (pipes, redirects, && work); Windows runs PowerShell; Android runs adb shell. Output is capped per stream (the tail is kept). Use detach:true for long-running programs (returns pid + log path immediately; read the log later with vm_exec "tail"). Prefer this over GUI clicking for installs, builds, logs and inspection.',
+      inputSchema: z.object({
+        vm_id: z.string().describe('VM uuid from the lease'),
+        command: z.string().min(1).describe('Shell command, e.g. "uname -a", "apt-get install -y strace", "ps auxf"'),
+        timeout_s: z.number().int().positive().max(3600).default(120).describe('Kill the command after this many seconds'),
+        cwd: z.string().optional().describe('Working directory inside the VM'),
+        stdin: z.string().optional().describe('Text piped to the command\'s stdin'),
+        detach: z.boolean().default(false).describe('Start in the background under nohup and return immediately'),
+      }),
+      annotations: { destructiveHint: true },
+    },
+    async ({ vm_id, command, timeout_s, cwd, stdin, detach }) => {
+      const start = Date.now();
+      try {
+        const vm = await vmOf(deps, vm_id);
+        const adapter = await adapterFor(deps, vm, 'vm_exec');
+        if (DRAIN_ENABLED) await deps.lite.incrementToolCalls(vm.uuid);
+        try {
+          const res = await adapter.exec(vm, command, [], { timeoutMs: timeout_s * 1000, cwd, stdin, detach });
+          const payload = { exit_code: res.exitCode, stdout: res.stdout, stderr: res.stderr, timed_out: res.timedOut ?? false, truncated: res.truncated ?? false, duration_ms: res.durationMs };
+          // A nonzero exit is a normal result the agent should read, not a tool failure.
+          return okResult('vm_exec', payload, start);
+        } finally {
+          if (DRAIN_ENABLED) await deps.lite.decrementToolCalls(vm.uuid);
+        }
+      } catch (e) {
+        return errorResult('vm_exec', toVmError(e, 'vm_exec'), start);
+      }
+    },
+  );
+
+  server.registerTool(
+    'vm_snapshot',
+    {
+      title: 'Snapshot / revert the VM',
+      description:
+        'Proxmox snapshots of the leased VM. action "create" saves the current disk (and RAM with with_memory:true, so a revert resumes the exact running state); "revert" rolls back and leaves the VM running (open connections are reset — the next tool call reconnects); "list"; "delete". Typical lab loop: create "clean" → install/run the thing → observe → revert "clean" → try again.',
+      inputSchema: z.object({
+        vm_id: z.string().describe('VM uuid from the lease'),
+        action: z.enum(['create', 'revert', 'list', 'delete']),
+        name: z.string().optional().describe('Snapshot name (letters, digits, _ and -; starts with a letter). Required except for list.'),
+        description: z.string().optional(),
+        with_memory: z.boolean().default(false).describe('Include RAM state (slower, larger; revert resumes running programs)'),
+      }),
+      annotations: { destructiveHint: true },
+    },
+    async ({ vm_id, action, name, description, with_memory }) => {
+      const start = Date.now();
+      try {
+        const vm = await vmOf(deps, vm_id);
+        if (action === 'list') return okResult('vm_snapshot', { snapshots: await labMethod(deps, 'listSnapshots')(vm.uuid) }, start);
+        if (!name) throw vmError('INVALID_REQUEST', `vm_snapshot ${action} needs a name`);
+        if (action === 'create') {
+          const res = await labMethod(deps, 'createSnapshot')(vm.uuid, { name, description, withMemory: with_memory });
+          return okResult('vm_snapshot', res, start);
+        }
+        if (action === 'delete') {
+          await labMethod(deps, 'deleteSnapshot')(vm.uuid, name);
+          return okResult('vm_snapshot', { deleted: name }, start);
+        }
+        await labMethod(deps, 'rollbackSnapshot')(vm.uuid, name);
+        // Every in-VM session (MCP over SSH, tunnels) died with the old state.
+        if (deps.registry.has(vm.adapter)) deps.registry.get(vm.adapter).releaseConnection?.(vm);
+        return okResult('vm_snapshot', { reverted: name, note: 'VM restarted from the snapshot; give desktops a few seconds before screenshots' }, start);
+      } catch (e) {
+        return errorResult('vm_snapshot', toVmError(e, 'vm_snapshot'), start);
+      }
+    },
+  );
+
+  server.registerTool(
+    'vm_network',
+    {
+      title: 'Get or set the VM network policy',
+      description:
+        'Enforced by the Proxmox firewall outside the guest. mode "internet": outbound internet only — the LAN, the tailnet and other lease VMs are unreachable. mode "isolated": no outbound traffic at all (DNS included); the VM can still be driven. Omit mode to read the current policy. "enforced":false means the host firewall is off and the policy is NOT protecting anything. A change takes ~12s (the call waits until it is in force). Connections already open before switching to isolated can survive the switch — for untrusted samples lease with network:"isolated" from the start instead of switching later.',
+      inputSchema: z.object({
+        vm_id: z.string().describe('VM uuid from the lease'),
+        mode: z.enum(['internet', 'isolated']).optional(),
+      }),
+      annotations: { destructiveHint: true },
+    },
+    async ({ vm_id, mode }) => {
+      const start = Date.now();
+      try {
+        const vm = await vmOf(deps, vm_id);
+        const policy = mode ? await labMethod(deps, 'setNetwork')(vm.uuid, mode) : await labMethod(deps, 'getNetwork')(vm.uuid);
+        return okResult('vm_network', { ...policy }, start);
+      } catch (e) {
+        return errorResult('vm_network', toVmError(e, 'vm_network'), start);
+      }
+    },
+  );
+
+  server.registerTool(
+    'vm_capture',
+    {
+      title: 'Capture the VM\'s network traffic',
+      description:
+        'Packet capture on the Proxmox host (outside the guest — nothing in the VM can hide from it). action "start" begins recording; "status" shows size; "stop" ends it and returns a behavior summary: DNS lookups (with answers), TLS server names, plaintext HTTP requests, and every outbound flow with bytes and whether a TCP connection was answered or blocked. The raw .pcap path is returned for deeper analysis. Optional BPF filter, e.g. "not port 22".',
+      inputSchema: z.object({
+        vm_id: z.string().describe('VM uuid from the lease'),
+        action: z.enum(['start', 'status', 'stop']),
+        filter: z.string().optional().describe('BPF filter for start, e.g. "udp port 53 or tcp"'),
+        max_minutes: z.number().int().positive().max(240).default(60).describe('Auto-stop after this long'),
+        max_flows: z.number().int().positive().max(1000).default(100).describe('Flows listed in the stop summary'),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ vm_id, action, filter, max_minutes, max_flows }) => {
+      const start = Date.now();
+      try {
+        const vm = await vmOf(deps, vm_id);
+        if (action === 'start') return okResult('vm_capture', { ...(await captures.start(vm, { filter, maxMs: max_minutes * 60_000 })) }, start);
+        if (action === 'status') {
+          const st = captures.status(vm.uuid);
+          return okResult('vm_capture', st ? { ...st } : { active: false, note: 'no capture for this VM' }, start);
+        }
+        return okResult('vm_capture', { ...(await captures.stop(vm.uuid, { maxFlows: max_flows })) }, start);
+      } catch (e) {
+        return errorResult('vm_capture', toVmError(e, 'vm_capture'), start);
       }
     },
   );

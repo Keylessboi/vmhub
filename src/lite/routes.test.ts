@@ -999,3 +999,78 @@ describe("provisioning status (VMHUB_PROVISIONING_STATUS)", () => {
     expect(await c.proxmox.listVms()).toHaveLength(0);
   });
 });
+
+describe("lab controls: snapshots + network policy", () => {
+  test("lease starts under the default internet policy and can be isolated", async () => {
+    const c = makeCtx();
+    const h = handler(c);
+    const { json: lease } = await createLease(h, "lab-1");
+    const id = lease.vm.uuid;
+    expect((await call(h, "GET", `/v1/vms/${id}/network`)).json).toMatchObject({ mode: "internet", enforced: true });
+    const set = await call(h, "PUT", `/v1/vms/${id}/network`, { mode: "isolated" });
+    expect(set.status).toBe(200);
+    expect(set.json.mode).toBe("isolated");
+    expect((await call(h, "PUT", `/v1/vms/${id}/network`, { mode: "lan" })).status).toBe(400);
+  });
+
+  test("an explicit network request is applied at create", async () => {
+    const c = makeCtx();
+    const h = handler(c);
+    const { json: lease } = await call(h, "POST", "/v1/leases", { request_id: "lab-2", template_id: "2060", owner: "t", network: "isolated" });
+    expect((await call(h, "GET", `/v1/vms/${lease.vm.uuid}/network`)).json.mode).toBe("isolated");
+    expect((await call(h, "POST", "/v1/leases", { request_id: "lab-3", template_id: "2060", owner: "t", network: "open" })).status).toBe(400);
+  });
+
+  test("snapshot create / list / rollback / delete", async () => {
+    const c = makeCtx();
+    const h = handler(c);
+    const { json: lease } = await createLease(h, "lab-4");
+    const base = `/v1/vms/${lease.vm.uuid}/snapshots`;
+    const created = await call(h, "POST", base, { name: "clean", with_memory: true });
+    expect(created.status).toBe(201);
+    expect(created.json.snapshots).toMatchObject([{ name: "clean", withMemory: true }]);
+    expect((await call(h, "POST", base, { name: "1bad" })).status).toBe(400);
+    expect((await call(h, "POST", `${base}/clean/rollback`)).json).toEqual({ rolledBack: "clean" });
+    expect((await call(h, "POST", `${base}/nope/rollback`)).status).toBe(404);
+    expect((await call(h, "DELETE", `${base}/clean`)).json).toEqual({ deleted: "clean" });
+    expect((await call(h, "GET", base)).json).toEqual([]);
+  });
+
+  test("lab routes 404 for unknown VMs", async () => {
+    const h = handler(makeCtx());
+    expect((await call(h, "GET", "/v1/vms/nope/snapshots")).status).toBe(404);
+    expect((await call(h, "GET", "/v1/vms/nope/network")).status).toBe(404);
+  });
+});
+
+describe("release is only idempotent once the VM is gone", () => {
+  test("a retry after a failed destroy tears the VM down instead of answering released", async () => {
+    const c = makeCtx();
+    const h = handler(c);
+    const { json: lease } = await createLease(h, "rel-1");
+    const id = lease.vm.uuid;
+
+    // First release: Proxmox refuses (a lock, a VM mid-rollback).
+    const destroy = c.proxmox.destroyVm.bind(c.proxmox);
+    let fail = true;
+    let destroyed = 0;
+    c.proxmox.destroyVm = async (vmid: number) => {
+      if (fail) throw new Error("can't lock file '/var/lock/qemu-server/lock-2000.conf' - got timeout");
+      destroyed++;
+      return destroy(vmid);
+    };
+    expect((await call(h, "DELETE", `/v1/leases/${id}`)).status).toBeGreaterThanOrEqual(500);
+    expect(c.db.getVm(id)).not.toBeNull();
+
+    // The retry must destroy it, not shrug and report success.
+    fail = false;
+    const retry = await call(h, "DELETE", `/v1/leases/${id}`);
+    expect(retry.status).toBe(200);
+    expect(destroyed).toBe(1);
+    expect(c.db.getVm(id)).toBeNull();
+
+    // Now that nothing is left, further retries are plain idempotent.
+    expect((await call(h, "DELETE", `/v1/leases/${id}`)).json).toEqual({ vmId: id, status: "released" });
+    expect(destroyed).toBe(1);
+  });
+});

@@ -67,9 +67,9 @@ describe('assertToolAvailable', () => {
   });
 
   it('throws CAPABILITY_UNAVAILABLE when the tool is not on the surface', () => {
-    // put_file is not in WindowsAdapter.availableTools() (no sftp on CursorTouch).
+    // clone_repo is not in WindowsAdapter.availableTools() (no git path on CursorTouch).
     try {
-      assertToolAvailable('vm_put_file', windowsAdapter);
+      assertToolAvailable('vm_clone_repo', windowsAdapter);
       expect.unreachable('should have thrown');
     } catch (e) {
       expect(e).toMatchObject({ code: 'CAPABILITY_UNAVAILABLE' });

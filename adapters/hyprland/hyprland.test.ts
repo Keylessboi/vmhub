@@ -43,10 +43,10 @@ describe('HyprlandAdapter capability declaration', () => {
     expect(hyprlandAdapter.capability.windowing).toEqual(['hyprland']);
   });
 
-  it('declares input + no exec (hyprland-mcp has no exec tool)', () => {
+  it('declares input plus an SSH shell and scp beside hyprland-mcp', () => {
     expect(hyprlandAdapter.capability.input).toEqual(['click', 'type', 'key', 'paste', 'drag']);
-    expect(hyprlandAdapter.capability.exec).toBe(false);
-    expect(hyprlandAdapter.capability.files).toEqual([]);
+    expect(hyprlandAdapter.capability.exec).toBe(true);
+    expect(hyprlandAdapter.capability.files).toEqual(['scp']);
   });
 });
 
@@ -58,8 +58,8 @@ describe('HyprlandAdapter availableTools', () => {
     }
   });
 
-  it('does not advertise exec', () => {
-    expect(hyprlandAdapter.availableTools()).not.toContain('exec');
+  it('advertises exec and file transfer over SSH', () => {
+    for (const t of ['exec', 'put_file', 'get_file', 'clone_repo']) expect(hyprlandAdapter.availableTools()).toContain(t);
   });
 });
 

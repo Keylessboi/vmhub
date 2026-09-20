@@ -14,10 +14,10 @@ describe('X11Adapter capability declaration', () => {
     expect(x11Adapter.capability.windowing).toEqual(['x11']);
   });
 
-  it('declares input + no exec (computer-use-linux has no exec tool)', () => {
+  it('declares input plus an SSH shell and scp beside computer-use-linux', () => {
     expect(x11Adapter.capability.input).toEqual(['click', 'type', 'key', 'drag']);
-    expect(x11Adapter.capability.exec).toBe(false);
-    expect(x11Adapter.capability.files).toEqual([]);
+    expect(x11Adapter.capability.exec).toBe(true);
+    expect(x11Adapter.capability.files).toEqual(['scp']);
   });
 
   it('notes the transport in the capability', () => {
@@ -33,9 +33,10 @@ describe('X11Adapter availableTools', () => {
     }
   });
 
-  it('does not advertise exec, paste, launch or close (not on the surface)', () => {
+  it('advertises exec and file transfer (SSH) but not paste, launch or close', () => {
     const tools = x11Adapter.availableTools();
-    for (const t of ['exec', 'paste', 'launch', 'close']) {
+    for (const t of ['exec', 'put_file', 'get_file', 'clone_repo']) expect(tools).toContain(t);
+    for (const t of ['paste', 'launch', 'close']) {
       expect(tools).not.toContain(t);
     }
   });
