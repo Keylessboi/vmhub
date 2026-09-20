@@ -18,27 +18,33 @@ what to keep in any rebuild:
   default, so nothing has to catch a 5-second menu. The image is a legacy
   BIOS install — OVMF cannot boot it (`No bootable option`), despite the
   earlier note here.
-- **No DHCP and no cloud-init.** dnsmasq on vmbr1 never answers Android's
-  DISCOVER, so the image configures itself from `/data/local/vmhub-net.sh`
-  (run at bootcomplete via a hook in `/system/etc/init.sh`): static
-  10.10.10.100, and — the part that is easy to miss — routes written into
-  Android's own routing tables (`local_network`, `eth0`), because Android
-  routes per network and a default route in `main` is ignored.
+- **No DHCP and no cloud-init**, and Android will not leave a hand-made
+  config alone. dnsmasq on vmbr1 never answers Android's DISCOVER, so the
+  image configures itself — but two earlier attempts failed and are worth
+  not repeating:
+  - a `bootcomplete` hook in `/system/etc/init.sh` never ran on a fresh
+    clone (boot-complete waits for the device to finish booting past its
+    lock screen), so clones had no network at all;
+  - a one-shot init service did run, but Android's own Ethernet stack
+    reconfigures `eth0` afterwards and dropped the address, so ADB appeared
+    and then vanished a few minutes later.
+
+  The golden now ships `/system/bin/vmhub-net.sh` as a **long-running**
+  init service (`/system/etc/init/vmhub-net.rc`, class `late_start`, root)
+  that re-asserts every 5s: the static address, the routes — written into
+  Android's own tables (`local_network`, `eth0`), since Android routes per
+  network and ignores a default route in `main` — and `service.adb.tcp.port`.
+  The boot entry also sets `androidboot.selinux=permissive` so the service
+  may touch the routing tables.
 - **Every clone carries that address**, so vmhub-lite refuses a second
   Android lease rather than hand out a colliding VM.
 - **adbd on tcp 5555** (`service.adb.tcp.port`, plus a persisted
   `persist.adb.tcp.port`), and `adb root` works — the adapter escalates on
   connect, falling back to `su -c`.
-- **Known gap: clones have no default route.** The fix is written
-  (`/data/local/vmhub-net.sh` now retries until the gateway answers, putting
-  routes in `local_network`/`eth0`), but it must be baked by rebuilding the
-  template — editing the base zvol after `qm template` does NOT reach clones,
-  which derive from the `@__base__` snapshot. Clone 2110 to a staging VMID,
-  run `deploy/android-net.sh` inside it (or let the boot script run), verify
-  `ping 1.1.1.1` from the guest, then re-template and swap.
-- **Known gap: a snapshot revert did not restore /data** in the Android
-  guest (the marker file survived). Worth re-checking once the routing
-  rebuild lands.
+- **Rebuild the template, never the base volume.** Editing
+  `base-<vmid>-disk-0` after `qm template` does NOT reach clones: they are
+  created from its `@__base__` snapshot. Clone to a staging VMID, change
+  that, verify, then swap it into the golden's VMID.
 - **Known gap: no DNS inside Android.** `cmd netd resolver setnetdns` fails
   (rc 218) and this build has no `cmd ethernet`, so names do not resolve;
   traffic by IP works. The proper fix is an Ethernet IpConfiguration
