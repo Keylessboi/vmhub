@@ -8,7 +8,7 @@
 | 2060 | x11-2404 | all pass | needed `ciupgrade=0` on clones, and X as a service (see below) |
 | 2070 | hyprland-2404 | all pass | rebuilt with `wtype` (hyprland-mcp's typing/key backend); old image kept as stopped VM 9071 |
 | 2100 | windows-11-24h2 | all pass | rebuilt 2026-09-19 (see below); old image kept as stopped VM 9102 |
-| 2110 | bliss-android16 | leasable | rebuilt 2026-09-19: boots via a vmhub GRUB entry, static 10.10.10.100, adbd on 5555, `adb root` works. No resolver inside Android yet (see below) |
+| 2110 | bliss-android16 | 20/24 | rebuilt 2026-09-19: boots, adb + `adb root`, screen/input/files, network policy, capture, lease/release all work. Open: clones have no default route (see below), so no internet or DNS, and a snapshot revert left /data unchanged |
 
 **The Android golden (BlissOS 16.9.7 / Android 13).** What it needed, and
 what to keep in any rebuild:
@@ -29,6 +29,16 @@ what to keep in any rebuild:
 - **adbd on tcp 5555** (`service.adb.tcp.port`, plus a persisted
   `persist.adb.tcp.port`), and `adb root` works — the adapter escalates on
   connect, falling back to `su -c`.
+- **Known gap: clones have no default route.** The fix is written
+  (`/data/local/vmhub-net.sh` now retries until the gateway answers, putting
+  routes in `local_network`/`eth0`), but it must be baked by rebuilding the
+  template — editing the base zvol after `qm template` does NOT reach clones,
+  which derive from the `@__base__` snapshot. Clone 2110 to a staging VMID,
+  run `deploy/android-net.sh` inside it (or let the boot script run), verify
+  `ping 1.1.1.1` from the guest, then re-template and swap.
+- **Known gap: a snapshot revert did not restore /data** in the Android
+  guest (the marker file survived). Worth re-checking once the routing
+  rebuild lands.
 - **Known gap: no DNS inside Android.** `cmd netd resolver setnetdns` fails
   (rc 218) and this build has no `cmd ethernet`, so names do not resolve;
   traffic by IP works. The proper fix is an Ethernet IpConfiguration
