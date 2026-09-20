@@ -134,7 +134,10 @@ try {
   check('vm_exec keeps exit code + stderr', rc.result?.exit_code === 7 && /to-stderr/.test(`${rc.result.stderr}${rc.result.stdout}`), rc);
   const tStart = Date.now();
   const to = await call('vm_exec', { vm_id: vmId, command: P.sleep, timeout_s: 3 });
-  check('vm_exec enforces timeout', (to.result?.timed_out === true || !to.ok) && Date.now() - tStart < 25_000, { to, ms: Date.now() - tStart });
+  // Android's first call may re-establish adb (connect + adb root) around the
+  // command itself, so allow more wall time there; the kill is what matters.
+  const timeoutBound = os === 'android' ? 90_000 : 25_000;
+  check('vm_exec enforces timeout', (to.result?.timed_out === true || !to.ok) && Date.now() - tStart < timeoutBound, { to, ms: Date.now() - tStart });
 
   // ── files ──────────────────────────────────────────────────────────────
   const dir = mkdtempSync(join(tmpdir(), 'e2e-lab-'));
