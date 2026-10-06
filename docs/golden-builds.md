@@ -72,6 +72,41 @@ cloud-init clean --logs; truncate -s0 /etc/machine-id`, power off, restore the
 golden's `ipconfig0`, `qm template <staging>`, run `scripts/e2e-lab.ts <staging>`,
 and only then swap it into the golden's VMID (keep a full-clone backup of the old one).
 
+**Ghidra layer (x11 2060, windows 2100).** Both desktop goldens carry
+Ghidra 12.1.2 and [GhidraMCP](https://github.com/bethington/ghidra-mcp) 6.0.0,
+installed by `scripts/golden-ghidra/install-linux.sh` (as root) and
+`install-windows.ps1` (elevated) inside a staging clone, per the rebuild
+recipe above. **Status 2026-10-06: scripts written, not yet applied** — the
+host's boot disk (sdb, the `pve` VG) dropped out and the host needs a power
+cycle first. Once applied, each clone runs:
+
+| Piece | x11 | windows |
+|---|---|---|
+| Ghidra (+ GhidraMCP GUI extension, installed at install level) | `/opt/ghidra`, menu entry, `ghidra` on PATH | `C:\Tools\ghidra`, Public desktop shortcut |
+| GhidraMCP headless REST server, `127.0.0.1:8089` | `ghidra-mcp-headless.service` (vmuser) | task `GhidraMCP-Headless` (SYSTEM, at startup) |
+| MCP bridge, streamable-http `0.0.0.0:8081/mcp` | `ghidra-mcp-bridge.service` | task `GhidraMCP-Bridge` |
+| Same bridge for stdio clients inside the VM | `bridge-mcp-ghidra` | `C:\Tools\ghidra-mcp-bridge\Scripts\bridge-mcp-ghidra.exe` |
+
+- **The versions move together.** A Ghidra extension only loads on the exact
+  Ghidra it was built for (`extension.properties` `version=12.1.2`), so bump
+  Ghidra only to a version a GhidraMCP release declares. LaurieWired's original
+  GhidraMCP stopped at 1.4 / Ghidra 11.3.2; bethington's fork is the maintained one.
+- **Headless by default, GUI optional.** The bridge points at the headless
+  server (`GHIDRA_MCP_URL`), so the MCP works on a fresh clone with nothing
+  clicked. Opening Ghidra's CodeBrowser and enabling the plugin starts a
+  second server on the next free port; the bridge's `list_instances` finds it.
+- **Host-header allowlist = 10.10.10.1-254.** The bridge's DNS-rebinding guard
+  learns the guest's addresses at startup, but lite readdresses Windows clones
+  after boot, so the launchers allow the whole guest subnet explicitly.
+- **x11 RAM is 8 GB** (was 4): Ghidra's GUI plus the headless JVM do not fit
+  beside Xorg in 4. `qm set 2060 --memory 8192` on the golden itself.
+- Script endpoints are on (`GHIDRA_MCP_ALLOW_SCRIPTS=1`): agents already have
+  root/admin through vm_exec, so it adds nothing an agent could not do anyway.
+- **Using it from the workstation:** forward the bridge through the host,
+  `ssh -F ~/.config/vmhub/ssh_config -N -L 18081:<vm-ip>:8081 vmhub-host`,
+  and add `http://127.0.0.1:18081/mcp` as a streamable-http MCP server; or
+  just `vm_exec curl http://127.0.0.1:8089/...` against the REST server.
+
 How each golden template was built, the gotchas, and what a fresh clone needs.
 
 ## Shared base: debian-13-golden (VMID 2030)
