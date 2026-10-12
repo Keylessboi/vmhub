@@ -140,6 +140,10 @@ Wants=ghidra-mcp-headless.service
 
 [Service]
 User=$DESKTOP_USER
+# The bridge only discovers the Ghidra server at startup. Started before the server
+# listens it registers 8 meta-tools instead of ~220, so wait for the server first
+# ("After=" only waits for the process to start, not for the port).
+ExecStartPre=/bin/bash -c 'for i in \$(seq 1 90); do curl -fsS -m 3 http://127.0.0.1:8089/check_connection >/dev/null 2>&1 && exit 0; sleep 2; done; exit 1'
 ExecStart=/usr/local/bin/ghidra-mcp-bridge-http
 Restart=on-failure
 RestartSec=5
@@ -169,7 +173,10 @@ sid, init = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
     "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "golden-check", "version": "1"}}})
 call({"jsonrpc": "2.0", "method": "notifications/initialized"}, sid)
 _, tools = call({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, sid)
-print("bridge:", init["result"]["serverInfo"], "tools:", len(tools["result"]["tools"]))
+n = len(tools["result"]["tools"])
+print("bridge:", init["result"]["serverInfo"], "tools:", n)
+# 8 means the bridge started before the Ghidra server was up and registered only its meta-tools.
+raise SystemExit(0 if n >= 100 else "bridge exposes only %d tools" % n)
 EOF
 rm -rf "$CACHE"
 log "done"

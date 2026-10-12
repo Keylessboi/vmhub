@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "id": "pixel-buds-pro-2",
+  "skeleton": true,
+  "description": "SKELETON of the user's own Pixel Buds Pro 2. Only values recorded in the user's research notes are filled in; everything else is marked unknown. Not a faithful clone until the unknown fields are captured from the real device.",
+  "name": "Pixel Buds Pro 2",
+  "address": "10:D9:A2:48:20:7D",
+  "class_of_device": "0x244404",
+  "appearance": "0x0941",
+  "advertising": {
+    "flags": {"unknown": true},
+    "local_name": {"unknown": true, "note": "The device name is 'Pixel Buds Pro 2', but the name carried in the advertising payload was not recorded."},
+    "service_data": [
+      {"uuid": "184E", "unknown_fields": ["data_hex"], "note": "ASCS general announcement; notes record sink contexts 0x0fff and source contexts 0x0243 but not the payload bytes."},
+      {"uuid": "184F", "unknown_fields": ["data_hex"]},
+      {"uuid": "1853", "unknown_fields": ["data_hex"]},
+      {"uuid": "1855", "unknown_fields": ["data_hex"]}
+    ],
+    "manufacturer_data": {"unknown": true},
+    "unknown_fields": ["flags", "local_name", "manufacturer_data", "service_uuids"],
+    "note": "The real buds use extended advertising (props 0x0001) from a rotating RPA; this emulator uses legacy advertising from a fixed address."
+  },
+  "scan_response": {"unknown": true},
+  "gatt": {
+    "note": "GAP (1800) and GATT (1801) are added automatically. The real device has 15 services / 48 characteristics; only the UUIDs listed here were recorded. Values and most properties were never read.",
+    "services": [
+      {
+        "uuid": "109b862f-50e3-45cc-8ea1-ac62de4846d1",
+        "name": "Android Head Tracker (LE v2.0)",
+        "characteristics": [
+          {
+            "uuid": "b4eb9919-a910-46a2-a9dd-fec2525196fd",
+            "name": "Head tracker version (feature report 2)",
+            "properties": ["read"],
+            "value_hex": "23416e64726f696448656164547261636b657223322e3023320000000000000000425410d9a248207d"
+          },
+          {
+            "uuid": "8584cbb5-2d58-45a3-ab9d-583e0958b067",
+            "name": "Head tracker control (feature report 1)",
+            "properties": ["read", "write"],
+            "value_hex": "0000"
+          },
+          {
+            "uuid": "e66dd173-b2ae-4f5a-ae16-0162af8038ae",
+            "name": "Head tracker report (input report 1, 13 bytes)",
+            "properties": ["notify"],
+            "unknown_fields": ["value_hex", "descriptors"],
+            "note": "The real device produced 0 notifications over GATT after control 03 00. No frame was ever recorded. Use send_scripted_notifications to inject synthetic or later-captured frames."
+          }
+        ]
+      },
+      {"uuid": "180F", "name": "Battery", "characteristics": [], "unknown_fields": ["characteristics"], "note": "Present on the real device; characteristic list and values not recorded."},
+      {
+        "uuid": "180A",
+        "name": "Device Information",
+        "characteristics": [
+          {"uuid": "2A50", "name": "PnP ID", "unknown_fields": ["properties", "value_hex"], "note": "Notes give VID 0x00E0 PID 0x3005 version 0x0100 (modalias v00E0p3005d0100) but not the GATT byte value, so none is set."},
+          {"uuid": "2A29", "name": "Manufacturer Name String", "unknown_fields": ["properties", "value_hex"]},
+          {"uuid": "2A24", "name": "Model Number String", "unknown_fields": ["properties", "value_hex"]},
+          {"uuid": "2A25", "name": "Serial Number String", "unknown_fields": ["properties", "value_hex"]},
+          {"uuid": "2A26", "name": "Firmware Revision String", "unknown_fields": ["properties", "value_hex"], "note": "Firmware 'release_5.203' was reported over RFCOMM, not this characteristic; not set as a value."}
+        ]
+      },
+      {
+        "uuid": "184E",
+        "name": "Audio Stream Control (ASCS)",
+        "characteristics": [
+          {"uuid": "2BC4", "name": "Sink ASE 1", "properties": ["read", "notify"], "unknown_fields": ["value_hex"]},
+          {"uuid": "2BC4", "name": "Sink ASE 2", "properties": ["read", "notify"], "unknown_fields": ["value_hex"]},
+          {"uuid": "2BC5", "name": "Source ASE 1", "properties": ["read", "notify"], "unknown_fields": ["value_hex"]},
+          {"uuid": "2BC5", "name": "Source ASE 2", "properties": ["read", "notify"], "unknown_fields": ["value_hex"]},
+          {"uuid": "2BC6", "name": "ASE Control Point", "properties": ["write", "notify"], "unknown_fields": ["value_hex"], "note": "Notes say 'write/notify'; the exact write type is not recorded."}
+        ]
+      },
+      {
+        "uuid": "1850",
+        "name": "Published Audio Capabilities (PACS)",
+        "characteristics": [
+          {"uuid": "2BC9", "name": "Sink PAC", "unknown_fields": ["properties", "value_hex"]},
+          {"uuid": "2BCA", "name": "Sink Audio Locations", "unknown_fields": ["properties", "value_hex"]},
+          {"uuid": "2BCC", "name": "Source Audio Locations", "unknown_fields": ["properties", "value_hex"], "note": "Notes: one Source Audio Location declared (Front Left); bytes not recorded."},
+          {"uuid": "2BCB", "name": "Source PAC", "unknown_fields": ["properties", "value_hex"]},
+          {"uuid": "2BCD", "name": "Available Audio Contexts", "unknown_fields": ["properties", "value_hex"]},
+          {"uuid": "2BCE", "name": "Supported Audio Contexts", "unknown_fields": ["properties", "value_hex"]}
+        ]
+      },
+      {
+        "uuid": "184D",
+        "name": "Microphone Control (MICS)",
+        "characteristics": [
+          {"uuid": "2BC3", "name": "Mute", "properties": ["read", "write", "notify"], "unknown_fields": ["value_hex"]}
+        ]
+      },
+      {
+        "uuid": "1855",
+        "name": "TMAP",
+        "characteristics": [
+          {"uuid": "2B51", "name": "TMAP Role", "unknown_fields": ["properties", "value_hex"]}
+        ]
+      },
+      {"uuid": "184F", "name": "Broadcast Audio Scan (BASS)", "characteristics": [], "unknown_fields": ["characteristics"]},
+      {"uuid": "1844", "name": "Volume Control (VCS)", "characteristics": [], "unknown_fields": ["characteristics"]},
+      {"uuid": "1853", "name": "Common Audio (CAS)", "characteristics": [], "unknown_fields": ["characteristics"]},
+      {"uuid": "FE2C", "name": "Google Fast Pair", "characteristics": [], "unknown_fields": ["characteristics"]},
+      {"uuid": "15190001-12f4-c226-88ed-2ac5579f2a85", "name": "vendor service (purpose unknown)", "characteristics": [], "unknown_fields": ["characteristics"]}
+    ]
+  },
+  "a2dp_sink": {"unknown": true, "note": "Capabilities not recorded. Notes only say the phone's A2DP link switches AAC to Opus 48 kHz during spatialized playback."},
+  "avrcp": {"unknown": true},
+  "classic_info": {
+    "hid": {"vendor_id": "0x00E0", "product_id": "0x3005", "version": "0x0100", "note": "BR/EDR HID head tracker (#AndroidHeadTracker#1.0) as seen on the Pixel 7a; L2CAP PSM 0x11/0x13. Not emulated."},
+    "rfcomm_services": [
+      {"channel": 1, "uuid": "25e97ff7-24ce-4c4c-8951-f764a708f7b5", "name": "MAESTRO APP"},
+      {"channel": 2, "uuid": "df21fe2c-2515-4fdb-8886-f12c4d67927c", "name": "GFPS RFCOMM (Fast Pair)"},
+      {"channel": 3, "uuid": "25e97ff7-24ce-4c4c-8951-f764a708f7b4", "name": "DEBUG APP"},
+      {"channel": 4, "uuid": "f8d1fbe4-7966-4334-8024-ff96c9330e15", "name": "GSND CONTROL"},
+      {"channel": 5, "uuid": "81c2e72a-0591-443e-a1ff-05f988593351", "name": "GSND AUDIO"},
+      {"channel": 9, "uuid": "e7ab2241-ca64-4a69-ac02-05f5c6fe2d62", "name": "BTIS", "note": "connection refused on the real device"}
+    ],
+    "firmware": "release_5.203"
+  },
+  "provenance": {
+    "name": "pixel-buds-pro-2-headtracking.md (sensor entry); sound-retry/docs/research/pixel-buds-pro-2-mic-2026-09-22.md (title)",
+    "address": "10:D9:A2:48:20:7D from sound-retry/docs/research/pixel-buds-pro-2-mic-2026-09-22.md header and pixel-buds-pro-2-headtracking.md section (e). This is the real buds' identity address; override with device_create(address=...) to avoid sharing it.",
+    "class_of_device": "0x244404 from sound-retry/docs/research/pixel-buds-pro-2-mic-2026-09-22.md header",
+    "appearance": "'Earbud' from sound-retry/docs/research/linux-le-audio-headtracking.md (LE advertising row). Numeric 0x0941 is the Bluetooth SIG assigned value for Earbud, derived while writing this skeleton, not read from the device.",
+    "advertising.service_data": "UUIDs 184E/184F/1853/1855 from sound-retry/docs/research/linux-le-audio-headtracking.md (ASCS general announcement, BASS, CAS, TMAP service data). Payload bytes not recorded.",
+    "gatt service and characteristic UUIDs": "sound-retry/docs/research/pixel-buds-pro-2-mic-2026-09-22.md Appendix B (B.1 service map; B.2 ASCS, MICS, TMAP, DIS and PACS tables). 1800/1801 omitted (auto-added). Properties for ASE (read,notify), ASE control point (write,notify) and MICS Mute (read,write,notify) from the same tables; PACS/TMAP/DIS properties not recorded.",
+    "head tracker service and characteristic UUIDs": "sound-retry/docs/research/s2-00-headtracker-stream.md Q3 (AOSP bta_hh_api.h names).",
+    "head tracker version value": "Live GATT read 2026-09-23 recorded in sound-retry/docs/research/s2-00-headtracker-stream.md: '#AndroidHeadTracker#2.0#2' + 00 x8 + 'BT' + 10 d9 a2 48 20 7d (transport capability 2 = ISO only).",
+    "head tracker control value": "Same file: read 00 00 (off). Writing 03 00 was accepted and stored; 0 notifications followed.",
+    "classic_info": "HID VID/PID and PSMs from pixel-buds-pro-2-headtracking.md section (b); RFCOMM UUID/channel table and firmware release_5.203 from sound-retry/docs/research/pixel-buds-pro-2-mic-2026-09-22.md.",
+    "still_needs_capture": [
+      "advertising payload (flags, name, manufacturer data, service data bytes, extended-advertising parameters)",
+      "scan response",
+      "all characteristic values except the two head-tracker ones",
+      "properties and descriptors for PACS, TMAP and DIS characteristics",
+      "characteristic lists of BASS, VCS, CAS, Fast Pair, Battery and the 15190001 vendor service",
+      "a2dp_sink capabilities (SBC/AAC/Opus) and avrcp events",
+      "any head-tracker input frames (the real device never sent one over GATT in the recorded sessions)"
+    ]
+  }
+}

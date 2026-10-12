@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "soundcore-q30",
+  "skeleton": true,
+  "description": "SKELETON of the user's own Soundcore Life Q30 (presumed model A3028) headphones. Almost nothing about the GATT/classic surface was ever recorded; the only filled-in values are the address, advertised name and the truncated vendor UUID prefix. Everything else is unknown.",
+  "name": "soundcore  Q30",
+  "address": "88:0E:85:CD:08:A6",
+  "class_of_device": {"unknown": true},
+  "appearance": {"unknown": true},
+  "advertising": {
+    "local_name": "soundcore  Q30",
+    "flags": {"unknown": true},
+    "manufacturer_data": {"unknown": true},
+    "unknown_fields": ["flags", "service_uuids", "manufacturer_data"],
+    "note": "Name is 'soundcore' + two spaces + 'Q30' exactly as recorded in project_soundcore_q30_firmware.md ('advertises \"soundcore  Q30\"'). Whether it is carried in the advertising payload or the scan response was not recorded."
+  },
+  "scan_response": {"unknown": true},
+  "gatt": {
+    "note": "Memory notes say the Q30 and the P40i earbuds expose an Anker vendor UUID with prefix 0cf12d31-fac3-4553-bd80-... The remaining 48 bits were NOT recorded, so no service is created. No services, characteristics or protocol bytes are known.",
+    "services": []
+  },
+  "a2dp_sink": {"unknown": true, "note": "Codec capabilities not recorded."},
+  "avrcp": {"unknown": true},
+  "classic_info": {
+    "vendor_uuid_prefix": "0cf12d31-fac3-4553-bd80-",
+    "presumed_model": "Life Q30 / A3028, BES2300 (presumed, 'confirm in app')"
+  },
+  "provenance": {
+    "name": "/home/travis/.claude/projects/-home-travis-Projects/memory/project_soundcore_q30_firmware.md ('advertises \"soundcore  Q30\"')",
+    "address": "88:0E:85:CD:08:A6 from the same memory file",
+    "vendor_uuid_prefix": "0cf12d31-fac3-4553-bd80-... (truncated in the same memory file; full UUID not available)",
+    "presumed_model": "A3028 / BES2300 from the same memory file, marked there as presumed",
+    "searched_without_result": "pixel-buds-pro-2-headtracking.md, project_rhythm_spatial_audio.md and /home/travis/Projects/sound-retry*/ contain nothing about the Q30 GATT database, UUIDs or protocol (the Soundcore app interception step described in the memory file was never done).",
+    "still_needs_capture": [
+      "advertising payload, scan response and class of device",
+      "complete GATT database (nRF Connect export or btmon) including the full vendor UUID(s)",
+      "A2DP codec capabilities and AVRCP events",
+      "app protocol bytes (requires the Soundcore app interception step)"
+    ]
+  }
+}

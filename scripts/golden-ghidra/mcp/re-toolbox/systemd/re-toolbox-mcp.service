@@ -1,0 +1,16 @@
+[Unit]
+Description=re-toolbox MCP server (reverse-engineering tools for AI agents)
+After=network.target
+
+[Service]
+Type=simple
+User=vmuser
+WorkingDirectory=/home/vmuser
+# Optional: RE_TOOLBOX_TOKEN=..., RE_TOOLBOX_ROOTS=/extra:/roots, RE_PYTHON=/opt/re-venv/bin/python
+EnvironmentFile=-/etc/default/re-toolbox-mcp
+ExecStart=/opt/re-venv/bin/python -m re_toolbox_mcp --host 0.0.0.0 --port 8086
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

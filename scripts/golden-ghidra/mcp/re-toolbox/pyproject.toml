@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "re-toolbox-mcp"
+version = "0.1.0"
+description = "MCP server exposing reverse-engineering tools (strace, ltrace, valgrind, binwalk, yara, upx, qemu-user, angr, mitmproxy) as structured tools"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["mcp>=1.28,<2"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+re-toolbox-mcp = "re_toolbox_mcp.server:main"
+
+[tool.setuptools]
+packages = ["re_toolbox_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,7 +1,7 @@
-# install-windows.ps1 — bake Ghidra + GhidraMCP into the Windows golden.
+# install-windows.ps1 - bake Ghidra + GhidraMCP into the Windows golden.
 #
 # Runs elevated inside a STAGING clone of windows-11-24h2 (never the template
-# itself — see docs/golden-builds.md). Idempotent.
+# itself - see docs/golden-builds.md). Idempotent.
 #
 # What a clone gets:
 #   C:\Tools\ghidra                    Ghidra 12.1.2 (+ GhidraMCP GUI extension), JDK = Temurin 21
@@ -59,7 +59,7 @@ $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', "`"$Cache\t
   'ADDLOCAL=FeatureMain,FeatureEnvironment,FeatureJarFileRunWith,FeatureJavaHome')
 if ($p.ExitCode -notin 0, 3010) { throw "JDK install failed: $($p.ExitCode)" }
 $JavaHome = [Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')
-$Java = "$JavaHome\bin\java.exe"
+$Java = (Join-Path $JavaHome.TrimEnd("\") "bin\java.exe")
 if (-not (Test-Path $Java)) { throw "java.exe not found under JAVA_HOME=$JavaHome" }
 
 Log "ghidra $GhidraVersion -> $GhidraDir"
@@ -80,10 +80,16 @@ $DesktopUser = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVer
 if ($DesktopUser) {
   $prefs = "C:\Users\$DesktopUser\AppData\Roaming\ghidra\ghidra_${GhidraVersion}_PUBLIC"
   New-Item -ItemType Directory -Force $prefs | Out-Null
-  if (-not (Select-String -Quiet -Path "$prefs\preferences" -Pattern '^USER_AGREEMENT=ACCEPT' -ErrorAction SilentlyContinue)) {
+  # Select-String on a file that does not exist yet is a terminating error under $ErrorActionPreference='Stop'.
+  if (-not ((Test-Path "$prefs\preferences") -and (Select-String -Quiet -Path "$prefs\preferences" -Pattern '^USER_AGREEMENT=ACCEPT'))) {
     Add-Content -Path "$prefs\preferences" -Value 'USER_AGREEMENT=ACCEPT' -Encoding ascii
   }
 }
+
+# A rerun finds the previous run's servers still up, and pip cannot replace a running bridge-mcp-ghidra.exe.
+foreach ($n in 'GhidraMCP-Headless', 'GhidraMCP-Bridge') { Stop-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue }
+Get-Process bridge-mcp-ghidra, java -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep 2
 
 Log "bridge $McpVersion -> $BridgeDir"
 # CursorTouch's golden already has Python 3.13 (per-user winget install).
@@ -109,11 +115,14 @@ Log 'launchers'
 `$env:GHIDRA_MCP_ALLOW_SCRIPTS = '1'   # lab VM: agents already have admin via vm_exec
 New-Item -ItemType Directory -Force '$McpDir\projects' | Out-Null
 Set-Location '$McpDir\projects'
-& '$Java' -Xmx3g -XX:+UseG1GC "-Dghidra.home=`$g" -Dapplication.name=GhidraMCP -classpath (`$cp -join ';') com.xebyte.headless.GhidraMCPHeadlessServer --bind 127.0.0.1 --port 8089 *>> '$McpDir\headless.log'
+& '$Java' -Xmx3g -XX:+UseG1GC "-Dghidra.home=`$g" "-Dapplication.name=GhidraMCP" -classpath (`$cp -join ';') com.xebyte.headless.GhidraMCPHeadlessServer --bind 127.0.0.1 --port 8089 *>> '$McpDir\headless.log'
 "@ | Set-Content -Encoding ascii "$McpDir\headless.ps1"
 # Host-header allowlist = the whole guest subnet: lite readdresses a clone
 # after boot, after the bridge has already computed its own addresses.
 @"
+# The bridge only discovers the Ghidra server at startup; started before the server listens it
+# registers 8 meta-tools instead of ~220. Both tasks start at boot, so wait for the server first.
+for (`$i = 0; `$i -lt 90; `$i++) { try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:8089/check_connection | Out-Null; break } catch { Start-Sleep 2 } }
 `$env:GHIDRA_MCP_URL = 'http://127.0.0.1:8089'
 `$env:GHIDRA_MCP_ALLOWED_HOSTS = ((1..254 | ForEach-Object { "10.10.10.`$_" }) -join ',')
 `$env:PYTHONIOENCODING = 'utf-8'
@@ -156,7 +165,10 @@ for _ in range(60):
         time.sleep(2)
 call({"jsonrpc": "2.0", "method": "notifications/initialized"}, sid)
 _, tools = call({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, sid)
-print("bridge:", init["result"]["serverInfo"], "tools:", len(tools["result"]["tools"]))
+n = len(tools["result"]["tools"])
+print("bridge:", init["result"]["serverInfo"], "tools:", n)
+# 8 means the bridge started before the Ghidra server was up and registered only its meta-tools.
+raise SystemExit(0 if n >= 100 else "bridge exposes only %d tools" % n)
 '@
 $check | & "$BridgeDir\Scripts\python.exe" -
 if ($LASTEXITCODE) { Get-Content "$McpDir\bridge.log" -Tail 30 -ErrorAction SilentlyContinue; throw 'bridge check failed' }
