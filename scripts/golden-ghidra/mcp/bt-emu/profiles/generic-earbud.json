@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "id": "generic-earbud",
+  "description": "Fully specified generic true-wireless earbud: Battery + Device Information over LE GATT, A2DP SBC sink and AVRCP target over BR/EDR. No vendor claims; every value is a lab placeholder.",
+  "name": "Generic Earbud",
+  "address": "F1:F2:F3:F4:F5:01",
+  "class_of_device": "0x240404",
+  "appearance": "0x0941",
+  "advertising": {
+    "flags": ["le_general_discoverable", "br_edr_not_supported"],
+    "local_name": "Generic Earbud",
+    "service_uuids": ["180F"]
+  },
+  "scan_response": {
+    "service_uuids": ["180A"],
+    "manufacturer_data": {"company_id": 65535, "data_hex": "01"}
+  },
+  "gatt": {
+    "services": [
+      {
+        "uuid": "180F",
+        "name": "Battery",
+        "characteristics": [
+          {"uuid": "2A19", "name": "Battery Level", "properties": ["read", "notify"], "value_hex": "57"}
+        ]
+      },
+      {
+        "uuid": "180A",
+        "name": "Device Information",
+        "characteristics": [
+          {"uuid": "2A29", "name": "Manufacturer Name String", "properties": ["read"], "value_hex": "4274456d75204c6162"},
+          {"uuid": "2A24", "name": "Model Number String", "properties": ["read"], "value_hex": "67656e657269632d6561726275642d31"},
+          {"uuid": "2A25", "name": "Serial Number String", "properties": ["read"], "value_hex": "454d5530303031"},
+          {"uuid": "2A26", "name": "Firmware Revision String", "properties": ["read"], "value_hex": "312e302e30"}
+        ]
+      }
+    ]
+  },
+  "a2dp_sink": {
+    "codecs": [
+      {
+        "type": "SBC",
+        "sampling_frequencies": [44100, 48000],
+        "channel_modes": ["mono", "dual_channel", "stereo", "joint_stereo"],
+        "block_lengths": [4, 8, 12, 16],
+        "subbands": [4, 8],
+        "allocation_methods": ["snr", "loudness"],
+        "min_bitpool": 2,
+        "max_bitpool": 53
+      }
+    ]
+  },
+  "avrcp": {
+    "role": "target",
+    "supported_events": ["PLAYBACK_STATUS_CHANGED", "TRACK_CHANGED", "VOLUME_CHANGED"]
+  }
+}

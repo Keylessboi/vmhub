@@ -72,6 +72,41 @@ cloud-init clean --logs; truncate -s0 /etc/machine-id`, power off, restore the
 golden's `ipconfig0`, `qm template <staging>`, run `scripts/e2e-lab.ts <staging>`,
 and only then swap it into the golden's VMID (keep a full-clone backup of the old one).
 
+**Ghidra layer (x11 2060, windows 2100).** Both desktop goldens carry
+Ghidra 12.1.2 and [GhidraMCP](https://github.com/bethington/ghidra-mcp) 6.0.0,
+installed by `scripts/golden-ghidra/install-linux.sh` (as root) and
+`install-windows.ps1` (elevated) inside a staging clone, per the rebuild
+recipe above. **Status 2026-10-06: scripts written, not yet applied** — the
+host's boot disk (sdb, the `pve` VG) dropped out and the host needs a power
+cycle first. Once applied, each clone runs:
+
+| Piece | x11 | windows |
+|---|---|---|
+| Ghidra (+ GhidraMCP GUI extension, installed at install level) | `/opt/ghidra`, menu entry, `ghidra` on PATH | `C:\Tools\ghidra`, Public desktop shortcut |
+| GhidraMCP headless REST server, `127.0.0.1:8089` | `ghidra-mcp-headless.service` (vmuser) | task `GhidraMCP-Headless` (SYSTEM, at startup) |
+| MCP bridge, streamable-http `0.0.0.0:8081/mcp` | `ghidra-mcp-bridge.service` | task `GhidraMCP-Bridge` |
+| Same bridge for stdio clients inside the VM | `bridge-mcp-ghidra` | `C:\Tools\ghidra-mcp-bridge\Scripts\bridge-mcp-ghidra.exe` |
+
+- **The versions move together.** A Ghidra extension only loads on the exact
+  Ghidra it was built for (`extension.properties` `version=12.1.2`), so bump
+  Ghidra only to a version a GhidraMCP release declares. LaurieWired's original
+  GhidraMCP stopped at 1.4 / Ghidra 11.3.2; bethington's fork is the maintained one.
+- **Headless by default, GUI optional.** The bridge points at the headless
+  server (`GHIDRA_MCP_URL`), so the MCP works on a fresh clone with nothing
+  clicked. Opening Ghidra's CodeBrowser and enabling the plugin starts a
+  second server on the next free port; the bridge's `list_instances` finds it.
+- **Host-header allowlist = 10.10.10.1-254.** The bridge's DNS-rebinding guard
+  learns the guest's addresses at startup, but lite readdresses Windows clones
+  after boot, so the launchers allow the whole guest subnet explicitly.
+- **x11 RAM is 8 GB** (was 4): Ghidra's GUI plus the headless JVM do not fit
+  beside Xorg in 4. `qm set 2060 --memory 8192` on the golden itself.
+- Script endpoints are on (`GHIDRA_MCP_ALLOW_SCRIPTS=1`): agents already have
+  root/admin through vm_exec, so it adds nothing an agent could not do anyway.
+- **Using it from the workstation:** forward the bridge through the host,
+  `ssh -F ~/.config/vmhub/ssh_config -N -L 18081:<vm-ip>:8081 vmhub-host`,
+  and add `http://127.0.0.1:18081/mcp` as a streamable-http MCP server; or
+  just `vm_exec curl http://127.0.0.1:8089/...` against the REST server.
+
 How each golden template was built, the gotchas, and what a fresh clone needs.
 
 ## Shared base: debian-13-golden (VMID 2030)
@@ -575,3 +610,34 @@ REMAINING (require deeper host investigation or user decision):
 (c) try a different macOS version on the fresh-disk path to see if ANY macOS
     boots on this host right now (isolates host-vs-version),
 (d) pursue the raw-8.2.5-process runtime with a host-side TSC workaround.
+
+## RE goldens: x11-re (2160), windows-re (2170), android-re (2180 / 2181) -- 2026-10-12
+
+Goal: reverse-engineering images where every tool sits behind an MCP server (`http://<vm-ip>:<port>/mcp`).
+All installers live in `scripts/golden-ghidra/`; each runs in a STAGING clone, never on a template.
+
+| VMID | Name | Ports (MCP) | Verified |
+|---|---|---|---|
+| 2160 | x11-re | 8081 ghidra, 8082 radare2, 8083 gdb, 8084 frida, 8085 wireshark, 8086 re-toolbox, 8087 bt-emu | `scripts/e2e-lab.ts 2160` 25/25 (before the Android additions below) |
+| 2170 | windows-re | 8081 ghidra (244 tools), 8083 x64dbg (38), 8085 wireshark (52), 8086 winre-toolbox (15); 8089 ghidra REST (localhost) | cold lease serves all four endpoints (~125 s); per-tool functional run on the staging VM: every winre-toolbox tool, wireshark and x64dbg session PASS except `x64dbg get_pe_header` (my test's assertion, tool answered). `e2e-lab.ts 2170` result: see PR comment / not recorded here if it had not finished |
+| 2180 | android-re | adb :5555, frida-server tcp :27042 | `e2e-lab.ts 2180` STALLED (`sys.boot_completed never became 1`); UNVERIFIED. Its frida .rc never auto-started (see below) |
+| 2181 | android-re2 | same | fresh lease: boots, frida-server auto-starts (`init.svc.frida-server=running`). e2e: 22/24 and a second run stalled after snapshot revert; see "Android flakiness" |
+
+### Builds
+- **x11-re**: clone x11-2404 (2060) -> staging, `install-linux-re-tools.sh` (apt tools, radare2 .deb, venv /opt/re-venv, pwndbg, frida, angr, mitmproxy, **jadx 1.5.6 zip, apktool, adb, apksigner, zipalign, aapt**), then `install-linux-re-mcp.sh` (one systemd unit per MCP). Seal: stop services, wipe /tmp artifacts, `cloud-init clean`, empty machine-id, power off, `qm clone <staging> 2160 --full`, `qm template`.
+- **windows-re**: clone windows-11-24h2 (2100) -> 9100, `install-windows.ps1` (Ghidra), `install-windows-re-tools.ps1`, `install-windows-re-mcp.ps1` (see `scripts/golden-ghidra/WINDOWS-RE.md`). Run each as a SYSTEM scheduled task and read its log (guest-agent exec dies with the job). Seal WITHOUT sysprep: a generalized image costs 15-20 min per lease. Stop the MCP tasks and java first, clear `C:\Tools\re-samples`, logs and tasks, `qm shutdown`, clone to 2170, `qm template`.
+- **android-re**: full clone of 2110 -> 9180 booted at 10.10.10.100, `install-android-re.sh` on the Proxmox host (adb root, remount, frida-server/frida-inject 17.23.3, re-env). Only on-device tools live here; static APK analysis is in x11-re (`re-toolbox` tools apktool_decode, jadx_decompile, apk_manifest, apk_sign_info, adb_*), pointed at a device given as host:port.
+
+### Gotchas (all hit for real)
+- Debian 13 has no `radare2` or `jadx` package (use release artifacts, sha256-pinned); apktool, adb, apksigner, zipalign, aapt are in apt.
+- Python: MCP servers need `mcp<2` except wireshark-mcp (>=2.1, own venv); never `pip install claripy` next to angr; bitstring < 5.
+- GhidraMCP bridge only discovers Ghidra at startup. Windows: a cold boot left a bridge with 30 tools instead of 244; `install-windows.ps1` now waits uncapped for :8089 and restarts the bridge if it logs "No Ghidra instances found".
+- Windows: Defender flags RE tools (capa/FLOSS/x64dbg/dnSpy): `Add-MpPreference -ExclusionPath C:\Tools` is part of `install-windows-re-tools.ps1`. Sysinternals tools print UTF-16 when redirected (strip NULs before matching) and banners on stderr. FLOSS needs the sample before `--no static`. `"$name:$port"` in PowerShell is a drive reference (use `${name}:${port}`). Stop java/bridge before re-extracting over their jars. Windows Update may apply a cumulative update at boot and keep the guest agent dead for 15+ minutes. ASCII-only files, tar.exe for big zips, winget is absent for SYSTEM (WinDbg skipped).
+- x64dbg-mcp: first `load_executable` after boot takes ~13 s and once failed with "Bridge disconnecting"; the installer does one warm-up load.
+- Android: init reads new `.rc` files only at boot. An `on property:sys.boot_completed=1` block added in a second .rc did NOT start frida-server on fresh leases (the manual `start` worked, a probe rc proved `on boot` and `on property:init.svc.bootanim=stopped` fire); 2181 uses `on boot`. `adb shell` swallows stdin (always `</dev/null`); `A()` in the installer now does that. One Android lease at a time (fixed IP).
+- Android flakiness (NOT caused by frida, seen on the original 2110 too): a leased clone sometimes comes up on the lock screen with no reachable network (ping/adb dead) and `sys.boot_completed` never read as 1; the first e2e check then takes 200-390 s. Control runs of 2110: 23/24 (DNS capture check failed) and a second run with 6 failures (boot not reported, vm_launch/vm_type/vm_key, internet HTTPS). The host was under heavy load (load average 15-30) from other VMs during these runs. 2181 runs: 22/24 (vm_launch, DNS capture) and one stall after `vm_snapshot revert` (no network after the revert boot). Treat Android e2e results from this session as inconclusive; rerun on a quiet host before swapping anything.
+- The hci_vhci module does not exist on the x11 cloud kernel: bt-emu offers the local-link backend only.
+
+### Not done / needs a decision
+- 2160 has NOT been re-sealed with the Android additions (jadx etc.): staging VM 9063 (clone of 2160) holds them and passed the tool tests; replacing 2160 needs the user's approval.
+- 2180 vs 2181: 2180 is kept untouched; 2181 is the candidate replacement.

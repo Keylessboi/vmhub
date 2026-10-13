@@ -1,0 +1,26 @@
+[Unit]
+Description=bt-emu-mcp: virtual Bluetooth lab (MCP server)
+After=network.target
+
+[Service]
+Type=simple
+User=vmuser
+# Needed only for the vhci backend: /dev/vhci must be readable and writable by this user.
+# The group must exist (systemd refuses to start the unit otherwise); 'bluetooth' is created by the bluez package.
+# Needs a udev rule such as  KERNEL=="vhci", MODE="0660", GROUP="bluetooth"  and the module loaded at boot
+# (echo hci_vhci > /etc/modules-load.d/hci_vhci.conf).  Check the real owner with: ls -l /dev/vhci
+# Not required for the default local-link backend.
+SupplementaryGroups=bluetooth
+# Extra profile directory searched before the bundled ones (optional).
+Environment=BT_EMU_PROFILES=/etc/bt-emu/profiles
+StateDirectory=bt-emu
+WorkingDirectory=/var/lib/bt-emu
+ExecStart=/opt/re-venv/bin/python -m bt_emu_mcp --host 0.0.0.0 --port 8087
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectHome=true
+# Nothing here transmits radio: the local-link backend is in-process and vhci is a virtual controller.
+
+[Install]
+WantedBy=multi-user.target

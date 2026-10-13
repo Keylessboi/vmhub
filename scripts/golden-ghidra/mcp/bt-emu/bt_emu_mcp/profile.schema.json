@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bt-emu-mcp.invalid/profile.schema.json",
+  "title": "bt-emu-mcp device profile",
+  "description": "An emulated Bluetooth device. Any field may be replaced by {\"unknown\": true} when it has not been captured from the real device; an object may list such fields in \"unknown_fields\". Unknown values are never invented: the emulator substitutes neutral defaults and reports them.",
+  "type": "object",
+  "required": ["schema_version", "id", "name"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "description": {"type": "string"},
+    "skeleton": {"type": "boolean", "description": "true when the profile is incomplete and only mirrors what was captured so far."},
+    "provenance": {"type": "object", "description": "Free-form: which source file each filled-in value came from and what still needs capture."},
+    "name": {"$ref": "#/$defs/maybe_string"},
+    "address": {"anyOf": [{"$ref": "#/$defs/bdaddr"}, {"$ref": "#/$defs/unknown"}]},
+    "class_of_device": {"anyOf": [{"$ref": "#/$defs/intlike"}, {"$ref": "#/$defs/unknown"}]},
+    "appearance": {"anyOf": [{"$ref": "#/$defs/intlike"}, {"$ref": "#/$defs/unknown"}]},
+    "advertising": {"anyOf": [{"$ref": "#/$defs/adv"}, {"$ref": "#/$defs/unknown"}]},
+    "scan_response": {"anyOf": [{"$ref": "#/$defs/adv"}, {"$ref": "#/$defs/unknown"}]},
+    "gatt": {"anyOf": [{"$ref": "#/$defs/gatt"}, {"$ref": "#/$defs/unknown"}]},
+    "a2dp_sink": {"anyOf": [{"$ref": "#/$defs/a2dp_sink"}, {"$ref": "#/$defs/unknown"}]},
+    "avrcp": {"anyOf": [{"$ref": "#/$defs/avrcp"}, {"$ref": "#/$defs/unknown"}]},
+    "classic_info": {"type": "object", "description": "Informational classic-side facts (HID ids, SDP/RFCOMM services). Not emulated."},
+    "unknown_fields": {"$ref": "#/$defs/unknown_fields"}
+  },
+  "$defs": {
+    "unknown": {
+      "type": "object",
+      "required": ["unknown"],
+      "properties": {"unknown": {"const": true}, "note": {"type": "string"}},
+      "additionalProperties": false
+    },
+    "unknown_fields": {"type": "array", "items": {"type": "string"}},
+    "maybe_string": {"anyOf": [{"type": "string", "minLength": 1}, {"$ref": "#/$defs/unknown"}]},
+    "bdaddr": {"type": "string", "pattern": "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$"},
+    "intlike": {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "string", "pattern": "^(0x[0-9A-Fa-f]+|[0-9]+)$"}]},
+    "hex": {"type": "string", "pattern": "^([0-9A-Fa-f]{2})*$"},
+    "uuid": {"type": "string", "pattern": "^(0x)?([0-9A-Fa-f]{4}|[0-9A-Fa-f]{8}|[0-9A-Fa-f]{32}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})$"},
+    "adv": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "flags": {"anyOf": [
+          {"type": "integer", "minimum": 0, "maximum": 255},
+          {"type": "array", "items": {"enum": ["le_limited_discoverable", "le_general_discoverable", "br_edr_not_supported", "le_br_edr_controller", "le_br_edr_host"]}},
+          {"$ref": "#/$defs/unknown"}
+        ]},
+        "local_name": {"anyOf": [{"type": "string"}, {"$ref": "#/$defs/unknown"}]},
+        "shortened_local_name": {"type": "string"},
+        "service_uuids": {"type": "array", "items": {"$ref": "#/$defs/uuid"}},
+        "service_data": {"type": "array", "items": {"type": "object", "required": ["uuid"], "additionalProperties": false,
+          "properties": {"uuid": {"$ref": "#/$defs/uuid"}, "data_hex": {"$ref": "#/$defs/hex"}, "unknown_fields": {"$ref": "#/$defs/unknown_fields"}, "note": {"type": "string"}}}},
+        "manufacturer_data": {"anyOf": [
+          {"type": "object", "required": ["company_id", "data_hex"], "additionalProperties": false,
+           "properties": {"company_id": {"type": "integer", "minimum": 0, "maximum": 65535}, "data_hex": {"$ref": "#/$defs/hex"}, "note": {"type": "string"}}},
+          {"$ref": "#/$defs/unknown"}
+        ]},
+        "tx_power": {"type": "integer"},
+        "appearance": {"$ref": "#/$defs/intlike"},
+        "raw_hex": {"$ref": "#/$defs/hex", "description": "Verbatim advertising payload; overrides every structured field."},
+        "unknown_fields": {"$ref": "#/$defs/unknown_fields"},
+        "note": {"type": "string"}
+      }
+    },
+    "notify_script": {
+      "type": "object",
+      "required": ["interval_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "pattern_hex": {"$ref": "#/$defs/hex", "description": "Byte pattern repeated on every tick."},
+        "frames_hex": {"type": "array", "items": {"$ref": "#/$defs/hex"}, "description": "Frames replayed in order (alternative to pattern_hex)."},
+        "counter": {"type": "object", "additionalProperties": false, "description": "Optionally replace one byte with an incrementing counter.",
+          "required": ["offset"], "properties": {"offset": {"type": "integer", "minimum": 0}}},
+        "interval_ms": {"type": "integer", "minimum": 1},
+        "repeat": {"type": "integer", "minimum": 0, "description": "Number of ticks; 0 or absent = until unsubscribed."},
+        "note": {"type": "string"}
+      },
+      "oneOf": [{"required": ["pattern_hex"]}, {"required": ["frames_hex"]}]
+    },
+    "descriptor": {
+      "type": "object", "required": ["uuid"], "additionalProperties": false,
+      "properties": {"uuid": {"$ref": "#/$defs/uuid"}, "value_hex": {"$ref": "#/$defs/hex"}, "unknown_fields": {"$ref": "#/$defs/unknown_fields"}, "note": {"type": "string"}}
+    },
+    "characteristic": {
+      "type": "object", "required": ["uuid"], "additionalProperties": false,
+      "properties": {
+        "uuid": {"$ref": "#/$defs/uuid"},
+        "name": {"type": "string"},
+        "properties": {"type": "array", "items": {"enum": ["broadcast", "read", "write_without_response", "write", "notify", "indicate", "authenticated_signed_writes", "extended_properties"]}},
+        "value_hex": {"$ref": "#/$defs/hex"},
+        "descriptors": {"type": "array", "items": {"$ref": "#/$defs/descriptor"}},
+        "notify_script": {"$ref": "#/$defs/notify_script"},
+        "unknown_fields": {"$ref": "#/$defs/unknown_fields"},
+        "note": {"type": "string"}
+      }
+    },
+    "service": {
+      "type": "object", "required": ["uuid"], "additionalProperties": false,
+      "properties": {
+        "uuid": {"$ref": "#/$defs/uuid"},
+        "name": {"type": "string"},
+        "primary": {"type": "boolean"},
+        "characteristics": {"type": "array", "items": {"$ref": "#/$defs/characteristic"}},
+        "unknown_fields": {"$ref": "#/$defs/unknown_fields"},
+        "note": {"type": "string"}
+      }
+    },
+    "gatt": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "services": {"type": "array", "items": {"$ref": "#/$defs/service"}},
+        "note": {"type": "string"}
+      }
+    },
+    "a2dp_sink": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "codecs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/sbc"}},
+        "note": {"type": "string"},
+        "unknown_fields": {"$ref": "#/$defs/unknown_fields"}
+      },
+      "required": ["codecs"]
+    },
+    "sbc": {
+      "type": "object", "required": ["type"], "additionalProperties": false,
+      "properties": {
+        "type": {"const": "SBC"},
+        "sampling_frequencies": {"type": "array", "items": {"enum": [16000, 32000, 44100, 48000]}},
+        "channel_modes": {"type": "array", "items": {"enum": ["mono", "dual_channel", "stereo", "joint_stereo"]}},
+        "block_lengths": {"type": "array", "items": {"enum": [4, 8, 12, 16]}},
+        "subbands": {"type": "array", "items": {"enum": [4, 8]}},
+        "allocation_methods": {"type": "array", "items": {"enum": ["snr", "loudness"]}},
+        "min_bitpool": {"type": "integer", "minimum": 2, "maximum": 250},
+        "max_bitpool": {"type": "integer", "minimum": 2, "maximum": 250}
+      }
+    },
+    "avrcp": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "role": {"enum": ["target", "controller"]},
+        "supported_events": {"type": "array", "items": {"enum": [
+          "PLAYBACK_STATUS_CHANGED", "TRACK_CHANGED", "TRACK_REACHED_END", "TRACK_REACHED_START",
+          "PLAYBACK_POS_CHANGED", "BATT_STATUS_CHANGED", "SYSTEM_STATUS_CHANGED",
+          "PLAYER_APPLICATION_SETTING_CHANGED", "NOW_PLAYING_CONTENT_CHANGED",
+          "AVAILABLE_PLAYERS_CHANGED", "ADDRESSED_PLAYER_CHANGED", "UIDS_CHANGED", "VOLUME_CHANGED"]}},
+        "note": {"type": "string"}
+      }
+    }
+  }
+}

@@ -18,6 +18,13 @@ describe('osFromTemplateName', () => {
     expect(osFromTemplateName('debian-13-golden')).toBe('headless');
   });
 
+  it('maps the RE goldens (x11-re, windows-re, android-re) to their adapters', () => {
+    expect(osFromTemplateName('x11-re')).toBe('x11');
+    expect(osFromTemplateName('windows-re')).toBe('windows');
+    expect(osFromTemplateName('android-re')).toBe('android');
+    expect(osFromTemplateName('android-re2')).toBe('android');
+  });
+
   it('is case-insensitive', () => {
     expect(osFromTemplateName('Hyprland-2404')).toBe('hyprland');
     expect(osFromTemplateName('WINDOWS-11')).toBe('windows');
