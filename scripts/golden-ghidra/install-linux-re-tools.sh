@@ -8,6 +8,7 @@
 #   static analysis  radare2, binwalk, upx, yara, capstone, python libs (lief, pwntools, angr)
 #   instrumentation  frida + frida-tools, qemu-user (run foreign-architecture binaries)
 #   capture          wireshark/tshark, tcpdump, mitmproxy
+#   android (static) jadx, apktool, adb, apksigner, zipalign, aapt (on-device tools live in the android-re image)
 #
 # Python packages go in one venv (/opt/re-venv, on PATH via /usr/local/bin links): Debian 13 marks the
 # system Python externally managed, and angr/pwntools pin their own dependency trees.
@@ -17,6 +18,8 @@ DESKTOP_USER=${DESKTOP_USER:-vmuser}
 VENV=/opt/re-venv
 R2_VERSION=6.2.4
 R2_SHA256=7019eedc0e0e87d1f53d6b8f5fc62b898567679c5efdce7fbfc557c9e7655e90
+JADX_VERSION=1.5.6
+JADX_SHA256=545ea2be9c242511bc145755cf4bda2485ade42966e096f8b4d3da2a230e8974
 log() { echo "== $*"; }
 
 id "$DESKTOP_USER" >/dev/null
@@ -33,7 +36,19 @@ apt-get install -y -q --no-install-recommends \
   binwalk upx-ucl yara \
   qemu-user-static binfmt-support \
   tshark wireshark tcpdump \
-  file xxd bsdextrautils binutils elfutils patchelf
+  file xxd bsdextrautils binutils elfutils patchelf \
+  default-jre-headless unzip apktool adb apksigner zipalign aapt
+
+log "jadx $JADX_VERSION (not packaged in Debian 13; official release zip, sha256-pinned)"
+if [ ! -x /opt/jadx/bin/jadx ] || ! /opt/jadx/bin/jadx --version 2>/dev/null | grep -q "$JADX_VERSION"; then
+  JADX_ZIP=/var/cache/jadx-$JADX_VERSION.zip
+  curl -fsSL --retry 3 -o "$JADX_ZIP.part" "https://github.com/skylot/jadx/releases/download/v$JADX_VERSION/jadx-$JADX_VERSION.zip"
+  echo "$JADX_SHA256  $JADX_ZIP.part" | sha256sum -c --quiet
+  rm -rf /opt/jadx.new && mkdir -p /opt/jadx.new && unzip -q "$JADX_ZIP.part" -d /opt/jadx.new
+  rm -rf /opt/jadx && mv /opt/jadx.new /opt/jadx && rm -f "$JADX_ZIP.part"
+fi
+ln -sf /opt/jadx/bin/jadx /usr/local/bin/jadx
+ln -sf /opt/jadx/bin/jadx-gui /usr/local/bin/jadx-gui
 
 log "radare2 $R2_VERSION (Debian 13 has no radare2 package; official release .deb, sha256-pinned)"
 R2_DEB=/var/cache/radare2_${R2_VERSION}_amd64.deb
@@ -87,6 +102,8 @@ check() { if command -v "$1" >/dev/null 2>&1; then printf '  ok   %-10s %s\n' "$
 check gdb --version; check strace -V; check ltrace --version; check valgrind --version
 check r2 -v; check binwalk --help; check upx -V; check yara --version
 check tshark --version; check tcpdump --version
+check jadx --version; check apktool --version; check adb version; check apksigner --version
+check aapt version; check zipalign --help
 check frida --version; check mitmdump --version; check qemu-aarch64-static --version
 "$VENV/bin/python" -c "import capstone, lief, pwn, angr; print('  ok   python libs: capstone', capstone.__version__, 'lief', lief.__version__, 'angr', angr.__version__)" 2>&1 | tail -1 || fail=1
 [ "$fail" = 0 ] || { echo "some tools are missing"; exit 1; }

@@ -48,6 +48,12 @@ function Fetch($url, $sha, $dest) {
 
 New-Item -ItemType Directory -Force $Tools, $Cache, $McpDir | Out-Null
 
+# A rerun finds the previous run's servers still up: a running java.exe holds GhidraMCP-*.jar (tar cannot replace it)
+# and pip cannot replace a running bridge-mcp-ghidra.exe. Stop them before touching any file.
+foreach ($n in 'GhidraMCP-Headless', 'GhidraMCP-Bridge') { Stop-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue }
+Get-Process bridge-mcp-ghidra, java -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep 2
+
 Log 'download'
 Fetch $GhidraUrl $GhidraSha256 "$Cache\$GhidraZip"
 Fetch "$McpBase/$McpZip" $McpZipSha256 "$Cache\$McpZip"
@@ -86,11 +92,6 @@ if ($DesktopUser) {
   }
 }
 
-# A rerun finds the previous run's servers still up, and pip cannot replace a running bridge-mcp-ghidra.exe.
-foreach ($n in 'GhidraMCP-Headless', 'GhidraMCP-Bridge') { Stop-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue }
-Get-Process bridge-mcp-ghidra, java -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep 2
-
 Log "bridge $McpVersion -> $BridgeDir"
 # CursorTouch's golden already has Python 3.13 (per-user winget install).
 $Python = @(
@@ -119,14 +120,36 @@ Set-Location '$McpDir\projects'
 "@ | Set-Content -Encoding ascii "$McpDir\headless.ps1"
 # Host-header allowlist = the whole guest subnet: lite readdresses a clone
 # after boot, after the bridge has already computed its own addresses.
-@"
 # The bridge only discovers the Ghidra server at startup; started before the server listens it
-# registers 8 meta-tools instead of ~220. Both tasks start at boot, so wait for the server first.
-for (`$i = 0; `$i -lt 90; `$i++) { try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:8089/check_connection | Out-Null; break } catch { Start-Sleep 2 } }
+# registers ~30 meta-tools instead of ~244. Both tasks start at boot and the headless JVM can take minutes
+# on a cold boot, and a single check_connection loop with a cap was seen to give up early (2026-10-12: a
+# booted clone served 30 tools). So: wait for the server without a cap, start the bridge, and if its own
+# output says it found no Ghidra instance, kill it and try again.
+@"
+`$ErrorActionPreference = 'Continue'
 `$env:GHIDRA_MCP_URL = 'http://127.0.0.1:8089'
 `$env:GHIDRA_MCP_ALLOWED_HOSTS = ((1..254 | ForEach-Object { "10.10.10.`$_" }) -join ',')
 `$env:PYTHONIOENCODING = 'utf-8'
-& '$BridgeDir\Scripts\bridge-mcp-ghidra.exe' --transport streamable-http --mcp-host 0.0.0.0 --mcp-port 8081 *>> '$McpDir\bridge.log'
+`$out = '$McpDir\bridge.out.log'; `$err = '$McpDir\bridge.log'   # uvicorn logs to stderr
+while (`$true) {
+  `$up = `$false
+  while (-not `$up) { try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:8089/check_connection | Out-Null; `$up = `$true } catch { Start-Sleep 2 } }
+  Start-Sleep 3
+  Remove-Item -Force `$out -ErrorAction SilentlyContinue
+  `$p = Start-Process -FilePath '$BridgeDir\Scripts\bridge-mcp-ghidra.exe' -PassThru -WindowStyle Hidden ``
+    -ArgumentList '--transport','streamable-http','--mcp-host','0.0.0.0','--mcp-port','8081' ``
+    -RedirectStandardOutput `$out -RedirectStandardError `$err
+  Start-Sleep 25
+  `$txt = if (Test-Path `$err) { Get-Content `$err -Raw -ErrorAction SilentlyContinue } else { '' }
+  if (`$txt -match 'No Ghidra instances found' -or `$p.HasExited) {
+    Add-Content '$McpDir\bridge.retries.log' ("bridge started without Ghidra, retrying: " + (Get-Date))
+    if (-not `$p.HasExited) { Stop-Process -Id `$p.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep 5
+    continue
+  }
+  `$p.WaitForExit()
+  exit `$p.ExitCode
+}
 "@ | Set-Content -Encoding ascii "$McpDir\bridge.ps1"
 
 Log 'scheduled tasks'

@@ -21,6 +21,7 @@ import uuid
 from collections import Counter
 from typing import Any, Literal
 
+from .android_tools import ANDROID_TOOLS
 from .core import (
     OUTPUT_CAP, ToolError, check_argv, check_command, check_path, clamp_timeout,
     have, kill_group, missing, new_workdir, re_python, read_tail, run_cmd, safe,
@@ -617,6 +618,9 @@ def _version_probes() -> list[tuple[str, list[str]]]:
         ("file", ["file", "--version"]), ("readelf", ["readelf", "--version"]),
         ("objdump", ["objdump", "--version"]), ("strings", ["strings", "--version"]),
         ("mitmdump", ["mitmdump", "--version"]),
+        ("jadx", ["jadx", "--version"]), ("apktool", ["apktool", "--version"]),
+        ("adb", ["adb", "version"]), ("aapt", ["aapt", "version"]),
+        ("apksigner", ["apksigner", "--version"]),
     ]
     probes += [(f"qemu-{a}-static", [f"qemu-{a}-static", "--version"]) for a in QEMU_ARCHES]
     return probes
@@ -662,3 +666,4 @@ ALL_TOOLS = [
     upx_unpack, file_info, qemu_user_run, angr_cfg, angr_find,
     mitm_capture_start, mitm_capture_stop, mitm_flows, tool_versions,
 ]
+ALL_TOOLS += ANDROID_TOOLS

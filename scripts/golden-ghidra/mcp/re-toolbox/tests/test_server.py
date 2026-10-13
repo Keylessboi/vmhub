@@ -13,6 +13,8 @@ EXPECTED = {
     "strace_run", "ltrace_run", "valgrind_run", "binwalk_scan", "yara_scan", "upx_info",
     "upx_unpack", "file_info", "qemu_user_run", "angr_cfg", "angr_find",
     "mitm_capture_start", "mitm_capture_stop", "mitm_flows", "tool_versions",
+    "apktool_decode", "jadx_decompile", "apk_manifest", "apk_sign_info",
+    "adb_shell", "adb_packages", "adb_pull_apk", "adb_install", "adb_logcat",
 }
 
 

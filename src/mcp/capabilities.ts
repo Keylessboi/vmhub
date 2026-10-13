@@ -128,10 +128,10 @@ interface TemplateMeta {
 /** Resource hints per adapter. Matrix metadata, not part of the machine contract. */
 const TEMPLATE_META: Record<string, TemplateMeta> = {
   hyprland: { ramMb: 4096, vcpus: 2, nestedVirt: false, notes: 'Hyprland desktop VM (golden hyprland-2404).' },
-  x11: { ramMb: 8192, vcpus: 2, nestedVirt: false, notes: 'X11 desktop VM (golden x11-2404) via computer-use-linux. Ghidra 12.1.2 at /opt/ghidra; GhidraMCP bridge at http://<vm-ip>:8081/mcp (headless server on 127.0.0.1:8089).' },
+  x11: { ramMb: 8192, vcpus: 2, nestedVirt: false, notes: 'X11 desktop VM (golden x11-2404) via computer-use-linux. Ghidra 12.1.2 at /opt/ghidra; GhidraMCP bridge at http://<vm-ip>:8081/mcp (headless server on 127.0.0.1:8089). The x11-re golden adds radare2, gdb+pwndbg, frida, wireshark, angr, strace/ltrace/valgrind, qemu-user, mitmproxy, jadx/apktool/adb and a virtual Bluetooth lab, each behind MCP on :8081-:8087 (docs/golden-builds.md).' },
   headless: { ramMb: 4096, vcpus: 2, nestedVirt: false, notes: 'Headless Linux golden (debian-13-golden): exec/SSH only, no display tools.' },
-  windows: { ramMb: 8192, vcpus: 4, nestedVirt: true, notes: 'Windows desktop VM via in-VM CursorTouch (golden windows-11-24h2). Ghidra 12.1.2 at C:\\Tools\\ghidra; GhidraMCP bridge at http://<vm-ip>:8081/mcp (headless server on 127.0.0.1:8089).' },
-  android: { ramMb: 4096, vcpus: 2, nestedVirt: true, notes: 'Android via host-side ADB (golden android-9-golden).' },
+  windows: { ramMb: 8192, vcpus: 4, nestedVirt: true, notes: 'Windows desktop VM via in-VM CursorTouch (golden windows-11-24h2). Ghidra 12.1.2 at C:\\Tools\\ghidra; GhidraMCP bridge at http://<vm-ip>:8081/mcp (headless server on 127.0.0.1:8089). The windows-re golden adds x64dbg (MCP :8083), Sysinternals, capa, FLOSS, DIE, ILSpy, Wireshark/tshark (MCP :8085) and winre-toolbox (MCP :8086).' },
+  android: { ramMb: 4096, vcpus: 2, nestedVirt: true, notes: 'Android via host-side ADB (golden android-9-golden). The android-re golden adds frida-server (tcp 27042) and frida-inject on the device; drive it from the x11-re image (frida MCP :8084, re-toolbox adb_* tools).' },
 };
 
 /** Production-real adapters: the live goldens. */

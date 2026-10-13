@@ -18,7 +18,7 @@ def fake(tmp_path, monkeypatch):
     monkeypatch.setenv("ARGLOG", str(tmp_path / "args.log"))
     monkeypatch.delenv("RE_TOOLBOX_ROOTS", raising=False)
     monkeypatch.setenv("RE_PYTHON", str(bindir / "re-python"))
-    for util in ("sleep", "mkdir"):
+    for util in ("sleep", "mkdir", "cat"):
         real = shutil.which(util, path="/usr/bin:/bin")
         if real:
             os.symlink(real, bindir / util)

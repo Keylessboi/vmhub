@@ -13,7 +13,8 @@ from .tools import ALL_TOOLS
 
 INSTRUCTIONS = (
     "Reverse-engineering toolbox running inside a disposable lab VM. Tools wrap "
-    "strace, ltrace, valgrind, binwalk, yara, upx, qemu-user, angr and mitmproxy. "
+    "strace, ltrace, valgrind, binwalk, yara, upx, qemu-user, angr and mitmproxy, plus Android static analysis (apktool, jadx, aapt, apksigner) "
+    "and adb_* tools against a device given as host:port. "
     "File paths must be under /home/vmuser, /tmp, /opt/re-samples or RE_TOOLBOX_ROOTS. "
     "Results are dicts with exit_code/stdout/stderr/truncated/duration_s; failures "
     "come back as an 'error' key (and 'missing_binary' if a tool is not installed)."
