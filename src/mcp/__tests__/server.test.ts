@@ -593,6 +593,22 @@ describe('lease edge cases', () => {
   });
 });
 
+describe('lease create cooldown under concurrency', () => {
+  it('throttles two parallel creates from one owner', async () => {
+    process.env.VMHUB_LEASE_CREATE_COOLDOWN_MS = '60000';
+    const lite = new FakeLite('x11', realCatalog());
+    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
+    const [a, b] = await Promise.all(
+      ['req-par-1', 'req-par-2'].map((request_id) =>
+        client.callTool({ name: 'vm_lease_create', arguments: { template_id: 'x11', owner: 'par-owner', request_id } }),
+      ),
+    );
+    const codes = [a!, b!].map((r) => (r.structuredContent as { error?: { code?: string } }).error?.code ?? 'ok');
+    expect(codes.sort()).toEqual(['QUOTA_EXCEEDED', 'ok']);
+    expect(lite.createLeaseCalls).toHaveLength(1);
+  });
+});
+
 describe('vm_health when lite is down', () => {
   it('reports the lite error message, not "[object Object]"', async () => {
     const lite = new FakeLite('x11');

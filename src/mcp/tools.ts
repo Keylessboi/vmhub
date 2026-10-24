@@ -378,19 +378,29 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             'wait then retry, or release existing leases with vm_lease_release',
           );
         }
-        const template = await resolveTemplate(deps, template_id);
-        if (template.availability !== 'available') {
-          throw vmError(
-            'CAPABILITY_UNAVAILABLE',
-            `template "${template_id}" is not available: ${template.reason ?? 'no live golden template'}`,
-          );
+        // Arm the cooldown before any await so concurrent creates from one
+        // owner are still throttled; roll it back if the request itself is
+        // rejected, so a typo'd template_id doesn't block the corrected retry.
+        lastLeaseCreate.set(owner, now);
+        let template: Template;
+        try {
+          template = await resolveTemplate(deps, template_id);
+          if (template.availability !== 'available') {
+            throw vmError(
+              'CAPABILITY_UNAVAILABLE',
+              `template "${template_id}" is not available: ${template.reason ?? 'no live golden template'}`,
+            );
+          }
+        } catch (e) {
+          if (lastLeaseCreate.get(owner) === now) {
+            if (lastCreate) lastLeaseCreate.set(owner, lastCreate);
+            else lastLeaseCreate.delete(owner);
+          }
+          throw e;
         }
         // Forward the RESOLVED id (a real Proxmox VMID when one exists), never
         // a local adapter alias lite cannot clone.
         const created = await deps.lite.createLease({ templateId: template.id, owner, requestId: request_id, ttlMs: ttl_ms });
-        // Start the cooldown only once lite accepted the create: a typo'd
-        // template_id must not lock the owner out of the corrected retry.
-        lastLeaseCreate.set(owner, now);
         const outcome = await pollUntil(
           () => deps.lite.getLease(created.lease.vmId),
           (s) => isLeaseSettled(s),
