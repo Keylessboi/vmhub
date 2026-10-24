@@ -118,7 +118,9 @@ fi
 
 # Register the pool as PVE storage so the API can see templates/VMs on it.
 # Idempotent: pvesm add fails if already registered — ignore that.
-pvesm add zfspool "$POOL" --pool "$POOL" --content images,rootdir --sparse 1 2>/dev/null \
+# --pool is the ENCRYPTED dataset: pointing it at the pool root would put VM
+# disks at vmhub/vm-* — outside vmhub/data, unencrypted.
+pvesm add zfspool "$POOL" --pool "$DATASET" --content images,rootdir --sparse 1 2>/dev/null \
   || echo "   storage $POOL already registered"
 
 echo "==> [6/7] auto-load key at boot"
@@ -135,7 +137,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStartPre=/bin/sh -c 'while ! zpool list ${POOL} >/dev/null 2>&1; do sleep 1; done'
 ExecStart=/usr/sbin/zfs load-key ${DATASET}
-ExecStartPost=/usr/bin/zfs mount ${DATASET}
+ExecStartPost=/usr/sbin/zfs mount ${DATASET}
 
 [Install]
 WantedBy=multi-user.target
@@ -150,13 +152,17 @@ echo "==> [7/7] Proxmox API token for vmhub (scoped, never root password)"
 if ! pveum user list 2>/dev/null | grep -q vmhub@pve; then
   pveum user add vmhub@pve --comment "vmhub control plane"
 fi
-# ACL apply is idempotent — always run it so re-runs converge.
-pveum acl modify /vms -token 'vmhub@pve!automation' -role PVEVMAdmin
 if pveum user token list vmhub@pve 2>/dev/null | grep -q automation; then
   echo "   token 'automation' already exists — do NOT rotate unless you re-capture it."
 else
   pveum user token add vmhub@pve automation --privsep 1
 fi
+# ACL apply is idempotent — always run it so re-runs converge. It must come
+# AFTER the token exists (acl modify -token fails on a missing token, and
+# set -e would abort before the token is ever created). A privsep token gets
+# the INTERSECTION of user and token permissions, so the user needs the role too.
+pveum acl modify /vms -user vmhub@pve -role PVEVMAdmin
+pveum acl modify /vms -token 'vmhub@pve!automation' -role PVEVMAdmin
 echo
 echo "NOTE: if the token was just created, its secret printed above. Store it"
 echo "      in Doppler (project: proxmox, config: prd) as PVE_TOKEN — shown"
