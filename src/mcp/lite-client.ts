@@ -17,7 +17,8 @@ export function liteBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 export interface LeaseResponse {
-  vm: Vm;
+  /** Absent once the lease is released: lite deletes the VM row but keeps the lease. */
+  vm?: Vm;
   lease: Lease;
 }
 
