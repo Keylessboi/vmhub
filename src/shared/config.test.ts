@@ -113,3 +113,18 @@ describe("resolveNodeConfigs", () => {
     expect(a).toEqual(b);
   });
 });
+
+describe("resolveNodeConfigs with empty env vars (systemd EnvironmentFile)", () => {
+  it("treats empty per-node vars as unset and falls back to PVE_HOST/PVE_TOKEN", () => {
+    // deploy/install.sh always writes these lines, empty when Doppler has no value.
+    const cfgs = resolveNodeConfigs({
+      PVE_HOST: "10.0.0.1:8006",
+      PVE_TOKEN: "secret",
+      VMHUB_NODES: "",
+      VMHUB_NODE_DL360P_BASE_URL: "",
+      VMHUB_NODE_DL360P_TOKEN: "",
+    });
+    expect(cfgs[0]?.baseUrl).toBe("10.0.0.1:8006");
+    expect(cfgs[0]?.tokenEnv).toBe("PVE_TOKEN");
+  });
+});

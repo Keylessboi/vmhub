@@ -72,13 +72,25 @@ export async function clientDiskFreePercent(proxmox: ProxmoxClient): Promise<num
   return (free / total) * 100;
 }
 
-/** Resolve a stored host path safely for deletion (path-traversal guard). */
-function resolveHostPath(root: string | undefined, hostPath: string): string | undefined {
-  if (isAbsolute(hostPath)) return hostPath;
+function isWithin(root: string, abs: string): boolean {
+  const r = resolve(root);
+  return abs === r || abs.startsWith(r + "/");
+}
+
+/**
+ * Resolve a stored host path safely for deletion (path-traversal guard).
+ * Relative paths resolve under `root`; absolute paths are honoured only when
+ * they sit inside one of the `allowedRoots` (the reaper runs as root, and
+ * host_path is caller-supplied via POST /v1/artifacts).
+ */
+function resolveHostPath(root: string | undefined, hostPath: string, allowedRoots: (string | undefined)[]): string | undefined {
+  if (isAbsolute(hostPath)) {
+    const abs = resolve(hostPath);
+    return allowedRoots.some((r) => r !== undefined && isWithin(r, abs)) ? abs : undefined;
+  }
   if (!root) return undefined;
   const abs = resolve(root, hostPath);
-  if (!abs.startsWith(resolve(root) + "/") && abs !== resolve(root)) return undefined;
-  return abs;
+  return isWithin(root, abs) ? abs : undefined;
 }
 
 /**
@@ -91,7 +103,7 @@ async function deleteStagedArtifact(
   scratchDir: string | undefined,
   artifactDir: string | undefined,
 ): Promise<void> {
-  const target = resolveHostPath(scratchDir ?? artifactDir, artifact.hostPath);
+  const target = resolveHostPath(scratchDir ?? artifactDir, artifact.hostPath, [scratchDir, artifactDir]);
   if (!target) return;
   try {
     await rm(target, { force: true });
@@ -163,14 +175,14 @@ export async function teardownLease(
       console.error(
         `[reaper] ALERT identity collision: ${identity.matches.length} VMs match tag "${vm.proxmoxTag}" + prefix "${vm.namePrefix}" — quarantining all leases`,
       );
-      const quarantinedIds: string[] = [];
-      for (const match of identity.matches) {
-        const allLeases = db.listLeasesWithVm();
-        const hit = allLeases.find((l) => l.vm.proxmoxTag === vm.proxmoxTag && l.vm.namePrefix === vm.namePrefix);
-        if (hit) {
-          db.quarantineLease(hit.vm.uuid);
-          quarantinedIds.push(hit.vm.uuid);
-        }
+      const quarantinedIds = db
+        .listLeasesWithVm()
+        .filter((l) => l.vm.proxmoxTag === vm.proxmoxTag && l.vm.namePrefix === vm.namePrefix)
+        .map((l) => l.vm.uuid);
+      // Dry run reports the quarantine but writes nothing: a quarantined lease
+      // drops out of every later sweep, so it is not a read-only outcome.
+      if (!opts.dryRun) {
+        for (const id of quarantinedIds) db.quarantineLease(id);
       }
       return { kind: "quarantined", vmIds: quarantinedIds };
     }

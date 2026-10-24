@@ -41,15 +41,21 @@ const EMPTY_METADATA: NodeConfig["metadata"] = { os: [], avx2: false, nestedVirt
  *
  * Multi-node fleets set VMHUB_NODES=a,b,c and provide per-node env vars.
  */
+function nonEmpty(value: string | undefined): string | undefined {
+  return value === undefined || value.trim() === "" ? undefined : value;
+}
+
 export function resolveNodeConfigs(env: Record<string, string | undefined> = process.env): NodeConfig[] {
   const raw = (env[NODES_ENV] ?? "").trim();
   const ids = raw !== "" ? raw.split(",").map((s) => s.trim()).filter(Boolean) : [DEFAULT_NODE_ID];
   return ids.map((id) => {
     const upper = id.toUpperCase();
-    const perNodeToken = env[`VMHUB_NODE_${upper}_TOKEN`];
+    // An empty value counts as unset: systemd EnvironmentFiles written by
+    // deploy/install.sh carry `VMHUB_NODE_<ID>_*=` lines even when unused.
+    const perNodeToken = nonEmpty(env[`VMHUB_NODE_${upper}_TOKEN`]);
     return {
       id,
-      baseUrl: env[`VMHUB_NODE_${upper}_BASE_URL`] ?? (id === DEFAULT_NODE_ID ? env.PVE_HOST : undefined) ?? "",
+      baseUrl: nonEmpty(env[`VMHUB_NODE_${upper}_BASE_URL`]) ?? (id === DEFAULT_NODE_ID ? nonEmpty(env.PVE_HOST) : undefined) ?? "",
       // Per-node token: if the per-node env var exists, use its standard name.
       // Legacy default node falls back to PVE_TOKEN when no per-node token is set.
       tokenEnv:
