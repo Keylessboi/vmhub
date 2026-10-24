@@ -109,7 +109,7 @@ export class WindowsAdapter implements DesktopAdapter {
 
   async screenshot(vm: Vm, opts?: { jpeg?: boolean }): Promise<ScreenshotResult> {
     const conn = await this.ensureConnection(vm);
-    const res = await conn.client.callTool({ name: 'Screenshot', arguments: {} });
+    const res = await callChecked(conn, 'Screenshot', {});
     const image = extractImage(res.content);
     const { width, height } = pngDimensions(image.data);
     if (width === 0 || height === 0) {
@@ -126,24 +126,24 @@ export class WindowsAdapter implements DesktopAdapter {
 
   async input(vm: Vm, action: InputAction): Promise<void> {
     const conn = await this.ensureConnection(vm);
+    // Argument names follow the pinned Windows-MCP v0.8.5 schemas
+    // (docs/vm-mcp-decisions.md): points are `loc: [x, y]`, chords `shortcut`.
     switch (action.kind) {
       case 'click':
-        await conn.client.callTool({ name: 'Click', arguments: { x: action.x, y: action.y } });
+        await callChecked(conn, 'Click', { loc: [action.x, action.y], ...(action.button ? { button: action.button } : {}) });
         return;
       case 'type':
-        await conn.client.callTool({ name: 'Type', arguments: { text: action.text } });
+      case 'paste':
+        // Windows-MCP's Type tool requires a target loc/label, which vm_type
+        // does not carry — type into the focused control via the clipboard.
+        await callChecked(conn, 'Clipboard', { mode: 'set', text: action.text });
+        await callChecked(conn, 'Shortcut', { shortcut: 'ctrl+v' });
         return;
       case 'key':
-        await conn.client.callTool({ name: 'Shortcut', arguments: { keys: action.chord } });
+        await callChecked(conn, 'Shortcut', { shortcut: action.chord });
         return;
       case 'drag':
-        await conn.client.callTool({
-          name: 'Move',
-          arguments: { start_x: action.from.x, start_y: action.from.y, end_x: action.to.x, end_y: action.to.y, drag: true },
-        });
-        return;
-      case 'paste':
-        await conn.client.callTool({ name: 'Clipboard', arguments: { text: action.text } });
+        await callChecked(conn, 'Move', { from_loc: [action.from.x, action.from.y], loc: [action.to.x, action.to.y], drag: true });
         return;
       case 'gesture':
         throw vmError('CAPABILITY_UNAVAILABLE', 'windows adapter: gestures not supported');
@@ -152,7 +152,7 @@ export class WindowsAdapter implements DesktopAdapter {
 
   async listWindows(vm: Vm, filter?: string): Promise<WindowInfo[]> {
     const conn = await this.ensureConnection(vm);
-    const res = await conn.client.callTool({ name: 'Snapshot', arguments: {} });
+    const res = await callChecked(conn, 'Snapshot', {});
     const text = textContent(res.content);
     const windows: WindowInfo[] = [];
     if (text) {
@@ -187,7 +187,7 @@ export class WindowsAdapter implements DesktopAdapter {
 
   async inspect(vm: Vm): Promise<SemanticElement> {
     const conn = await this.ensureConnection(vm);
-    const res = await conn.client.callTool({ name: 'Snapshot', arguments: {} });
+    const res = await callChecked(conn, 'Snapshot', {});
     const text = textContent(res.content);
     return {
       role: 'window',
@@ -208,7 +208,7 @@ export class WindowsAdapter implements DesktopAdapter {
   async dispatch(vm: Vm, verb: string, args: Record<string, unknown>): Promise<unknown> {
     const conn = await this.ensureConnection(vm);
     const tool = verb === 'launch' ? 'App' : verb === 'focus' ? 'App' : verb === 'close' ? 'App' : verb;
-    const res = await conn.client.callTool({ name: tool, arguments: args });
+    const res = await callChecked(conn, tool, args);
     return res.content;
   }
 
@@ -219,6 +219,24 @@ export class WindowsAdapter implements DesktopAdapter {
       this.conns.delete(vm.uuid);
     }
   }
+}
+
+/**
+ * Call a Windows-MCP tool and fail loudly on a tool-level error. FastMCP
+ * reports a raised exception as a normal result with `isError: true`, so an
+ * unchecked call turns "Either loc or label must be provided." into success.
+ */
+async function callChecked(
+  conn: { client: { callTool(req: { name: string; arguments: Record<string, unknown> }): Promise<unknown> } },
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ content: unknown[] }> {
+  const res = (await conn.client.callTool({ name, arguments: args })) as { content?: unknown[]; isError?: boolean };
+  const content = Array.isArray(res.content) ? res.content : [];
+  if (res.isError) {
+    throw vmError('INTERNAL', `windows adapter: ${name} failed: ${textContent(content) ?? 'unknown error'}`);
+  }
+  return { content };
 }
 
 /** Parse PNG dimensions from the IHDR chunk (bytes 16-23). */

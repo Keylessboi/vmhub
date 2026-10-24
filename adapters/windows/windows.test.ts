@@ -155,3 +155,57 @@ describe('VM existence check', () => {
     ).rejects.toThrow(/does not exist on Proxmox/);
   });
 });
+
+describe('input maps to the Windows-MCP v0.8.5 tool schemas', () => {
+  function recordingAdapter(result: { isError?: boolean; content?: unknown[] } = { content: [] }) {
+    const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+    const a = new WindowsAdapter();
+    (a as any).conns.set(vm.uuid, {
+      client: {
+        callTool: vi.fn(async (req: { name: string; arguments: Record<string, unknown> }) => {
+          calls.push(req);
+          return result;
+        }),
+      },
+      transport: {},
+    });
+    return { a, calls };
+  }
+
+  it('click sends loc=[x,y] and the button', async () => {
+    const { a, calls } = recordingAdapter();
+    await a.input(vm, { kind: 'click', x: 100, y: 200, button: 'right' });
+    expect(calls).toEqual([{ name: 'Click', arguments: { loc: [100, 200], button: 'right' } }]);
+  });
+
+  it('key sends {shortcut}', async () => {
+    const { a, calls } = recordingAdapter();
+    await a.input(vm, { kind: 'key', chord: 'ctrl+c' });
+    expect(calls).toEqual([{ name: 'Shortcut', arguments: { shortcut: 'ctrl+c' } }]);
+  });
+
+  it('drag sends an atomic Move with from_loc, loc and drag=true', async () => {
+    const { a, calls } = recordingAdapter();
+    await a.input(vm, { kind: 'drag', from: { x: 1, y: 2 }, to: { x: 3, y: 4 } });
+    expect(calls).toEqual([{ name: 'Move', arguments: { from_loc: [1, 2], loc: [3, 4], drag: true } }]);
+  });
+
+  it('paste and type set the clipboard (mode=set) then press ctrl+v', async () => {
+    for (const kind of ['paste', 'type'] as const) {
+      const { a, calls } = recordingAdapter();
+      await a.input(vm, { kind, text: 'hello' });
+      expect(calls).toEqual([
+        { name: 'Clipboard', arguments: { mode: 'set', text: 'hello' } },
+        { name: 'Shortcut', arguments: { shortcut: 'ctrl+v' } },
+      ]);
+    }
+  });
+
+  it('a tool result with isError surfaces as a typed error, not success', async () => {
+    const { a } = recordingAdapter({ isError: true, content: [{ type: 'text', text: 'Either loc or label must be provided.' }] });
+    await expect(a.input(vm, { kind: 'click', x: 1, y: 1 })).rejects.toMatchObject({
+      code: 'INTERNAL',
+      message: expect.stringContaining('Either loc or label must be provided.'),
+    });
+  });
+});
