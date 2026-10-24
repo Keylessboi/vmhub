@@ -132,3 +132,40 @@ describe('listVms resilience', () => {
     expect(vms.map((v) => v.vmid).sort()).toEqual([1001, 3000]);
   });
 });
+
+describe('RealProxmox regressions from the bug sweep', () => {
+  const original = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+  const json = (body: unknown) => new Response(JSON.stringify({ data: body }), { status: 200 });
+
+  it('getVm reports the static IP from ipconfig0 (the capability probe needs it)', async () => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/nodes')) return json([{ node: 'vmhub' }]);
+      if (url.includes('/status/current')) return json({ status: 'running', name: '2070-abcd1234' });
+      if (url.includes('/config')) return json({ tags: 'vmhub-2070-x', ipconfig0: 'ip=10.10.10.57/24,gw=10.10.10.1' });
+      return json({});
+    }) as unknown as typeof fetch;
+
+    const client = new RealProxmox({ host: 'h:8006', tokenId: 't', token: 's', nodeId: 'dl360p' });
+    const vm = await client.getVm(2001);
+    expect(vm.ip).toBe('10.10.10.57');
+  });
+
+  it('destroyVm treats a VM whose config is gone as already destroyed', async () => {
+    // Proxmox answers a missing VM with HTTP 500 "Configuration file ... does not exist".
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/nodes')) return json([{ node: 'vmhub' }]);
+      return new Response(
+        JSON.stringify({ message: "Configuration file 'nodes/vmhub/qemu-server/2001.conf' does not exist" }),
+        { status: 500 },
+      );
+    }) as unknown as typeof fetch;
+
+    const client = new RealProxmox({ host: 'h:8006', tokenId: 't', token: 's', nodeId: 'dl360p' });
+    await expect(client.destroyVm(2001)).resolves.toBeUndefined();
+  });
+});
