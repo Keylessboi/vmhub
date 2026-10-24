@@ -105,7 +105,8 @@ async function deleteStagedArtifact(
 ): Promise<void> {
   const target = resolveHostPath(scratchDir ?? artifactDir, artifact.hostPath, [scratchDir, artifactDir]);
   if (!target) {
-    console.error(`[reaper] not deleting artifact ${artifact.id}: hostPath '${artifact.hostPath}' is outside the artifact/scratch dirs`);
+    // JSON.stringify: hostPath is caller-supplied; keep newlines from forging log lines.
+    console.error(`[reaper] not deleting artifact ${JSON.stringify(artifact.id)}: hostPath ${JSON.stringify(artifact.hostPath)} is outside the artifact/scratch dirs`);
     return;
   }
   try {
