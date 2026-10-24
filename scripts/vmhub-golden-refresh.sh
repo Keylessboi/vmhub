@@ -25,9 +25,17 @@ LOG=/var/log/vmhub-golden-refresh.log
   else
     # absent or not a git repo — clone fresh (covers first-provision and
     # upgrades from old goldens where the source dir went missing)
-    rm -rf /opt/hyprland-mcp
-    git clone --depth 1 https://github.com/Keylessboi/hyprland-mcp.git /opt/hyprland-mcp 2>&1
-    echo "hyprland-mcp: cloned $(git -C /opt/hyprland-mcp rev-parse --short HEAD)"
+    # Clone beside it and swap only on success: deleting first left a VM that
+    # booted offline with NO hyprland-mcp at all, not the baked-in version.
+    rm -rf /opt/hyprland-mcp.new
+    if git clone --depth 1 https://github.com/Keylessboi/hyprland-mcp.git /opt/hyprland-mcp.new 2>&1; then
+      rm -rf /opt/hyprland-mcp
+      mv /opt/hyprland-mcp.new /opt/hyprland-mcp
+      echo "hyprland-mcp: cloned $(git -C /opt/hyprland-mcp rev-parse --short HEAD)"
+    else
+      rm -rf /opt/hyprland-mcp.new
+      echo "hyprland-mcp: clone failed — keeping the baked-in version"
+    fi
   fi
   if [ -d /opt/hyprland-mcp ]; then
     (cd /opt/hyprland-mcp && /usr/local/bin/bun-baseline install 2>&1 || true)

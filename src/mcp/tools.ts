@@ -9,7 +9,7 @@ import type { CapabilityId, DesktopAdapter, Template, Vm } from '../shared/types
 import type { AdapterRegistry } from '../../adapters/index.ts';
 import type { LiteClient } from './lite-client.ts';
 import { assertToolAvailable, capabilityReport, getTemplate, mergeDerivedTemplate, templateCatalog, templateFromAdapter, TOOL_CAPABILITY, type VmToolName } from './capabilities.ts';
-import { capabilityUnavailableError, errorResult, makeVmError, okResult, toVmError, vmError } from './errors.ts';
+import { capabilityUnavailableError, errorResult, isVmError, makeVmError, okResult, toVmError, vmError } from './errors.ts';
 import { pollUntil, POLL_BOUND_MS } from './polling.ts';
 import { writeScreenshot } from './files.ts';
 
@@ -160,6 +160,11 @@ async function vmOf(deps: McpDeps, vmId: string): Promise<Vm> {
 /** A lease's VM counts as "done provisioning" in these statuses. */
 const DONE_STATUSES = new Set(['ready', 'error', 'destroyed']);
 
+/** A released lease has no VM row left, so lite omits `vm` — nothing more to wait for. */
+function isLeaseSettled(s: { vm?: Vm }): boolean {
+  return !s.vm || DONE_STATUSES.has(s.vm.status);
+}
+
 export function registerTools(server: McpServer, deps: McpDeps): void {
   // ── CATALOG / CAPABILITIES / HEALTH ─────────────────────────────────────
 
@@ -298,7 +303,8 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           await deps.lite.getTemplates();
         } catch (e) {
           liteReachable = false;
-          liteError = e instanceof Error ? e.message : String(e);
+          // HttpLiteClient throws plain VmError objects, not Error instances.
+          liteError = isVmError(e) ? e.message : e instanceof Error ? e.message : String(e);
         }
         const adapters = deps.registry.ids().map((id) => {
           const a = deps.registry.get(id);
@@ -372,25 +378,36 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
             'wait then retry, or release existing leases with vm_lease_release',
           );
         }
+        // Arm the cooldown before any await so concurrent creates from one
+        // owner are still throttled; roll it back if the request itself is
+        // rejected, so a typo'd template_id doesn't block the corrected retry.
         lastLeaseCreate.set(owner, now);
-
-        const template = await resolveTemplate(deps, template_id);
-        if (template.availability !== 'available') {
-          throw vmError(
-            'CAPABILITY_UNAVAILABLE',
-            `template "${template_id}" is not available: ${template.reason ?? 'no live golden template'}`,
-          );
+        let template: Template;
+        try {
+          template = await resolveTemplate(deps, template_id);
+          if (template.availability !== 'available') {
+            throw vmError(
+              'CAPABILITY_UNAVAILABLE',
+              `template "${template_id}" is not available: ${template.reason ?? 'no live golden template'}`,
+            );
+          }
+        } catch (e) {
+          if (lastLeaseCreate.get(owner) === now) {
+            if (lastCreate) lastLeaseCreate.set(owner, lastCreate);
+            else lastLeaseCreate.delete(owner);
+          }
+          throw e;
         }
         // Forward the RESOLVED id (a real Proxmox VMID when one exists), never
         // a local adapter alias lite cannot clone.
         const created = await deps.lite.createLease({ templateId: template.id, owner, requestId: request_id, ttlMs: ttl_ms });
         const outcome = await pollUntil(
           () => deps.lite.getLease(created.lease.vmId),
-          (s) => DONE_STATUSES.has(s.vm.status),
+          (s) => isLeaseSettled(s),
           { timeoutMs: POLL_BOUND_MS },
         );
         const { vm, lease } = outcome.value;
-        const ready = vm.status === 'ready';
+        const ready = vm?.status === 'ready';
         return okResult(
           'vm_lease_create',
           {
@@ -428,16 +445,16 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
       try {
         const single = await deps.lite.getLease(lease_id);
         if (!wait_ms) {
-          return okResult('vm_lease_status', { vm: single.vm, lease: single.lease, ready: single.vm.status === 'ready' }, start);
+          return okResult('vm_lease_status', { vm: single.vm, lease: single.lease, ready: single.vm?.status === 'ready' }, start);
         }
         const outcome = await pollUntil(
           () => deps.lite.getLease(lease_id),
-          (s) => DONE_STATUSES.has(s.vm.status),
+          (s) => isLeaseSettled(s),
           { timeoutMs: wait_ms },
         );
         return okResult(
           'vm_lease_status',
-          { vm: outcome.value.vm, lease: outcome.value.lease, ready: outcome.value.vm.status === 'ready', timedOut: outcome.timedOut, polls: outcome.polls, elapsedMs: outcome.elapsedMs, estimatedRemainingMs: outcome.estimatedRemainingMs },
+          { vm: outcome.value.vm, lease: outcome.value.lease, ready: outcome.value.vm?.status === 'ready', timedOut: outcome.timedOut, polls: outcome.polls, elapsedMs: outcome.elapsedMs, estimatedRemainingMs: outcome.estimatedRemainingMs },
           start,
         );
       } catch (e) {
@@ -483,8 +500,8 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         let vmUuid: string | undefined;
         try {
           const { vm } = await deps.lite.getLease(lease_id);
-          adapterId = vm.adapter;
-          vmUuid = vm.uuid;
+          adapterId = vm?.adapter;
+          vmUuid = vm?.uuid;
         } catch {
           // lease may already be gone (e.g. reaper); skip cleanup
         }

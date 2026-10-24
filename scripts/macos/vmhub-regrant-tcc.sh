@@ -23,7 +23,14 @@
 set -euo pipefail
 
 AGENT_ID="com.vmhub.agent"
-TARGET_USER="${1:-vmhub}"
+TARGET_USER="vmhub"
+# Usage documents `--user vmhub`; also accept a bare positional user.
+case "${1:-}" in
+  --user) TARGET_USER="${2:?--user needs a value}" ;;
+  --user=*) TARGET_USER="${1#--user=}" ;;
+  "") ;;
+  *) TARGET_USER="$1" ;;
+esac
 USER_HOME="/Users/${TARGET_USER}"
 TCC_DB="${USER_HOME}/Library/Application Support/com.apple.TCC/TCC.db"
 

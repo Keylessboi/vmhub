@@ -553,3 +553,72 @@ describe('fakePng', () => {
     expect(png.readUInt32BE(20)).toBe(48); // IHDR height
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regressions from the bug sweep
+// ---------------------------------------------------------------------------
+
+describe('lease edge cases', () => {
+  it('vm_lease_status on a released lease (lite omits vm) reports not-ready instead of crashing', async () => {
+    const lite = new FakeLite('x11', realCatalog());
+    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
+    const lease: Lease = {
+      vmId: 'gone-1', owner: 'me', requestId: 'r', expiresAt: 0, lastRenewedAt: 0, renewCount: 0, maxLifetimeMs: 0,
+    };
+    // lite's releaseLease deletes the VM row and keeps the lease, so the JSON has no `vm`.
+    lite.leases.set('gone-1', { lease } as LeaseResponse);
+    for (const args of [{ lease_id: 'gone-1' }, { lease_id: 'gone-1', wait_ms: 50 }]) {
+      const res = await client.callTool({ name: 'vm_lease_status', arguments: args });
+      const sc = res.structuredContent as { ok?: boolean; result?: { ready?: boolean; timedOut?: boolean } };
+      expect(sc.ok).toBe(true);
+      expect(sc.result?.ready).toBe(false);
+      expect(sc.result?.timedOut ?? false).toBe(false);
+    }
+  });
+
+  it('a rejected vm_lease_create does not start the per-owner cooldown', async () => {
+    process.env.VMHUB_LEASE_CREATE_COOLDOWN_MS = '60000';
+    const lite = new FakeLite('x11', realCatalog());
+    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
+    const typo = await client.callTool({
+      name: 'vm_lease_create',
+      arguments: { template_id: '9999', owner: 'cooldown-owner', request_id: 'req-typo' },
+    });
+    expect((typo.structuredContent as { error?: { code?: string } }).error?.code).toBe('NOT_FOUND');
+    const fixed = await client.callTool({
+      name: 'vm_lease_create',
+      arguments: { template_id: 'x11', owner: 'cooldown-owner', request_id: 'req-fixed' },
+    });
+    expect((fixed.structuredContent as { ok?: boolean }).ok).toBe(true);
+  });
+});
+
+describe('lease create cooldown under concurrency', () => {
+  it('throttles two parallel creates from one owner', async () => {
+    process.env.VMHUB_LEASE_CREATE_COOLDOWN_MS = '60000';
+    const lite = new FakeLite('x11', realCatalog());
+    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
+    const [a, b] = await Promise.all(
+      ['req-par-1', 'req-par-2'].map((request_id) =>
+        client.callTool({ name: 'vm_lease_create', arguments: { template_id: 'x11', owner: 'par-owner', request_id } }),
+      ),
+    );
+    const codes = [a!, b!].map((r) => (r.structuredContent as { error?: { code?: string } }).error?.code ?? 'ok');
+    expect(codes.sort()).toEqual(['QUOTA_EXCEEDED', 'ok']);
+    expect(lite.createLeaseCalls).toHaveLength(1);
+  });
+});
+
+describe('vm_health when lite is down', () => {
+  it('reports the lite error message, not "[object Object]"', async () => {
+    const lite = new FakeLite('x11');
+    lite.getTemplates = async () => {
+      throw vmError('INTERNAL', 'vmhub-lite unreachable at http://127.0.0.1:8787');
+    };
+    const { client } = await connectServer({ registry: new Registry({ x11: x11Adapter }), lite });
+    const res = await client.callTool({ name: 'vm_health', arguments: {} });
+    const sc = res.structuredContent as { result?: { lite?: { reachable?: boolean; error?: string } } };
+    expect(sc.result?.lite?.reachable).toBe(false);
+    expect(sc.result?.lite?.error).toContain('vmhub-lite unreachable');
+  });
+});

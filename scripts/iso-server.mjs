@@ -27,6 +27,10 @@ const server = createServer((req, res) => {
       res.writeHead(403); res.end('Forbidden'); return;
     }
     const stat = statSync(filePath);
+    // A directory would 200 and then crash the process with an unhandled EISDIR.
+    if (!stat.isFile()) {
+      res.writeHead(404); res.end('Not found'); return;
+    }
     const total = stat.size;
     const range = req.headers.range;
 
@@ -37,6 +41,8 @@ const server = createServer((req, res) => {
       const m = /bytes=(\d*)-(\d*)/.exec(range);
       let start = m && m[1] ? parseInt(m[1], 10) : 0;
       let end = m && m[2] ? parseInt(m[2], 10) : total - 1;
+      // Suffix range "bytes=-N" means the LAST N bytes.
+      if (m && !m[1] && m[2]) { start = Math.max(0, total - parseInt(m[2], 10)); end = total - 1; }
       if (isNaN(start)) start = 0;
       if (isNaN(end)) end = total - 1;
       if (end >= total) end = total - 1;
@@ -47,11 +53,11 @@ const server = createServer((req, res) => {
         'Content-Range': `bytes ${start}-${end}/${total}`,
         'Content-Length': end - start + 1,
       });
-      createReadStream(filePath, { start, end }).pipe(res);
+      createReadStream(filePath, { start, end }).on('error', () => res.destroy()).pipe(res);
       console.log(`[${new Date().toISOString()}] ${req.socket.remoteAddress} RANGE ${start}-${end}/${total} ${url.pathname}`);
     } else {
       res.writeHead(200, { 'Content-Length': total });
-      createReadStream(filePath).pipe(res);
+      createReadStream(filePath).on('error', () => res.destroy()).pipe(res);
       console.log(`[${new Date().toISOString()}] ${req.socket.remoteAddress} GET ${total} ${url.pathname}`);
     }
   } catch (e) {

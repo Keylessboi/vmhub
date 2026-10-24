@@ -999,3 +999,25 @@ describe("provisioning status (VMHUB_PROVISIONING_STATUS)", () => {
     expect(await c.proxmox.listVms()).toHaveLength(0);
   });
 });
+
+describe("malformed requests from the bug sweep", () => {
+  test("a malformed percent-encoded path param → 400, not 500", async () => {
+    const h = handler(makeCtx());
+    const res = await call(h, "GET", "/v1/leases/%E0");
+    expect(res.status).toBe(400);
+    expect(res.json.error.code).toBe("INVALID_REQUEST");
+  });
+
+  test("a JSON body of null → 400, not 500", async () => {
+    const h = handler(makeCtx());
+    const res = await h(
+      new Request("http://localhost/v1/leases", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "null",
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as any).error.code).toBe("INVALID_REQUEST");
+  });
+});

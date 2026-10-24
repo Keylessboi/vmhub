@@ -181,6 +181,11 @@ export class RealProxmox implements ProxmoxClient {
       const msg = data?.errors ? Object.values(data.errors).join("; ") : data?.message || `HTTP ${res.status}`;
       // 401/403 → retryable=false (credential problem); 5xx/lock → retryable=true
       const retryable = res.status >= 500 || res.status === 409;
+      // A missing VM comes back as HTTP 500 "Configuration file ... does not
+      // exist", not 404. Type it NOT_FOUND so destroyVm stays idempotent.
+      if (res.status === 404 || /configuration file .* does not exist/i.test(msg)) {
+        throw vmError("NOT_FOUND", `proxmox ${method} ${pathname}: ${msg}`, false, "no-retry");
+      }
       throw vmError("INTERNAL", `proxmox ${method} ${pathname}: ${msg}`, retryable, retryable ? "retry-with-backoff" : "no-retry");
     }
     return data?.data ?? data;
@@ -335,8 +340,11 @@ export class RealProxmox implements ProxmoxClient {
   async getVm(vmid: number): Promise<ProxmoxVm> {
     const node = await this.node();
     const vm = await this.statusVm(vmid);
-    const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string };
-    return this.toVm({ ...vm, vmid }, this.parseTags(config), node);
+    const config = (await this.request("GET", `/nodes/${node}/qemu/${vmid}/config`)) as { tags?: string; ipconfig0?: string };
+    // createVm pins the static NAT IP in ipconfig0; probeCapabilities and the
+    // adapters need it back, or every probe fails with "no IP address".
+    const ip = config?.ipconfig0?.match(/(?:^|,)ip=([0-9.]+)/)?.[1];
+    return this.toVm({ ...vm, vmid }, this.parseTags(config), node, ip);
   }
 
   async listVms(): Promise<ProxmoxVm[]> {

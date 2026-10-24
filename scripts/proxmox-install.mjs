@@ -83,7 +83,9 @@ function auth() {
       if (m) { writeFileSync(TOKEN_FILE, m[1]); console.log(`  auth OK (${m[1].length} chars) attempt ${attempt}`); return m[1]; }
     } catch {}
     console.log(`  auth attempt ${attempt} failed — waiting 40s (login throttle)`);
-    sleep(40000);
+    // auth() is synchronous: the async sleep() returned a promise nobody
+    // awaited, so all 8 logins fired back-to-back and tripped the iLO lockout.
+    sleepSync(40000);
   }
   throw new Error('auth failed after 8 attempts');
 }
@@ -344,5 +346,6 @@ async function main() {
 // util
 // ---------------------------------------------------------------------------
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function sleepSync(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
 
 main();

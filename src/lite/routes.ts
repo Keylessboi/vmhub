@@ -905,7 +905,11 @@ function matchRoute(pattern: string[], segments: string[]): string[] | null {
     const p = pattern[i] as string;
     const s = segments[i] as string;
     if (p.startsWith(":")) {
-      params.push(decodeURIComponent(s));
+      try {
+        params.push(decodeURIComponent(s));
+      } catch {
+        throw invalidRequest(`malformed percent-encoding in path segment '${s}'`);
+      }
     } else if (p !== s) {
       return null;
     }
@@ -916,11 +920,16 @@ function matchRoute(pattern: string[], segments: string[]): string[] | null {
 async function readJson(req: Request): Promise<unknown> {
   const text = await req.text();
   if (text.trim() === "") return {};
+  let body: unknown;
   try {
-    return JSON.parse(text);
+    body = JSON.parse(text);
   } catch {
     throw invalidRequest("request body must be valid JSON");
   }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw invalidRequest("request body must be a JSON object");
+  }
+  return body;
 }
 
 function prefixFromTemplateId(templateId: string): string {

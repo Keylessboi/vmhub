@@ -1029,3 +1029,58 @@ describe("node registry resolution", () => {
     expect(opts.nodeId).toBe("nodeb");
   });
 });
+
+describe("reaper regressions from the bug sweep", () => {
+  let fx: Fixture;
+  let db: ReaperDb | undefined;
+
+  beforeEach(async () => {
+    fx = await makeFixture();
+  });
+
+  afterEach(async () => {
+    try {
+      db?.close();
+    } catch {
+      // already closed
+    }
+    db = undefined;
+    await rm(fx.dir, { recursive: true, force: true });
+  });
+
+  it("--dry-run on an identity collision quarantines nothing", async () => {
+    const proxmox = new MockProxmox();
+    await seedProxmoxVm(proxmox, fx);
+    await seedProxmoxVm(proxmox, fx); // same tag + prefix twice → collision
+    const now = Date.now();
+    await seedLease(fx, { vm: makeVm(fx), lease: makeLease(fx, { expiresAt: now - 1000 }) });
+
+    db = await openReaperDb(fx.dbPath);
+    await sweep(db, proxmox, { artifactDir: fx.artifactDir, now: () => now, dryRun: true });
+
+    // A quarantined lease drops out of every later sweep; a dry run must not do that.
+    expect(db.listLeasesWithVm()).toHaveLength(1);
+  });
+
+  it("never deletes an absolute artifact hostPath outside the artifact/scratch dirs", async () => {
+    const proxmox = new MockProxmox();
+    await seedProxmoxVm(proxmox, fx);
+    const now = Date.now();
+    // e.g. a host_path pointed at the shared DB via the unauthenticated POST /v1/artifacts
+    const victim = join(fx.dir, "victim.sqlite");
+    await writeFile(victim, "do-not-delete");
+    await seedLease(fx, {
+      vm: makeVm(fx),
+      lease: makeLease(fx, { expiresAt: now - 1000 }),
+      artifacts: [
+        { id: "art-1", leaseId: fx.uuid, hostPath: victim, sizeBytes: 1, inFlight: false, createdAt: now - 60_000 },
+      ],
+    });
+
+    db = await openReaperDb(fx.dbPath);
+    const report = await sweep(db, proxmox, { artifactDir: fx.artifactDir, now: () => now });
+
+    expect(report.destroyed).toBe(1);
+    expect(await exists(victim)).toBe(true);
+  });
+});
